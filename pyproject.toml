@@ -1,0 +1,19 @@
+[project]
+name = "greenpy"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "apache-sedona[kepler-map,pydeck-map]>=1.8.1",
+    "earthengine-api>=1.7.12",
+    "gdal==3.10.0",
+    "geopandas>=1.1.2",
+    "install-jdk>=1.1.0",
+    "ipykernel>=7.1.0",
+    "osmnx>=2.0.7",
+    "pyarrow>=23.0.0",
+    "python-dotenv>=1.2.1",
+    "rasterstats>=0.20.0",
+    "tqdm>=4.67.3",
+]
