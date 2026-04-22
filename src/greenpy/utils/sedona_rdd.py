@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import logging
+from loguru import logger
 from typing import TYPE_CHECKING
 
 from sedona.utils.adapter import Adapter
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 def create_spatial_rdds(query_sdf: DataFrame, object_sdf: DataFrame, build_on_spatial_partitioned_rdd: bool = True) -> tuple:
-    logging.debug("Creating Spatial RDDs for two spatial dataframes")
+    logger.debug("Creating Spatial RDDs for two spatial dataframes")
 
     query_rdd = Adapter.toSpatialRdd(query_sdf, "geometry")
     object_rdd = Adapter.toSpatialRdd(object_sdf, "geometry")
@@ -30,7 +30,7 @@ def create_spatial_rdds(query_sdf: DataFrame, object_sdf: DataFrame, build_on_sp
 
 
 def count_trees_rdd(sedona: SparkSession, query_rdd: SpatialRDD, object_rdd: SpatialRDD, query_column: str, using_index: bool = True) -> DataFrame:
-    logging.debug("Counting trees for each area using RDD")
+    logger.debug("Counting trees for each area using RDD")
 
     query_result = JoinQueryRaw.SpatialJoinQueryFlat(object_rdd, query_rdd, using_index, True)
     query_result_sdf = Adapter.toDf(query_result, [query_column], ["treeID"], sedona)

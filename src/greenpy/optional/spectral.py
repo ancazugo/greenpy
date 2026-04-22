@@ -4,7 +4,7 @@ Requires gee_project and gee_boundaries_asset in config.
 """
 
 import time
-import logging
+from loguru import logger
 from pathlib import Path
 
 import ee
@@ -15,7 +15,7 @@ from ..utils.constants import GEE_PROJECT_NAME
 
 def setup_gee(project: str | None = None) -> None:
     project = project or GEE_PROJECT_NAME
-    logging.debug(f"Initializing GEE for project: {project}")
+    logger.debug(f"Initializing GEE for project: {project}")
     ee.Authenticate()
     ee.Initialize(project=project, opt_url="https://earthengine-highvolume.googleapis.com")
 
@@ -28,7 +28,7 @@ def get_imagery(
     cloud_coverage: float,
     spectral_indexes: list[str],
 ) -> "ee.Image":
-    logging.debug("Querying GEE for imagery")
+    logger.debug("Querying GEE for imagery")
     union_geom = geo_level_filt_fc.union().geometry()
     import eemont  # noqa: F401 — registers .spectralIndices() on ee.ImageCollection
     return (
@@ -70,7 +70,7 @@ def process_geo_code(
     overwrite: bool = True,
 ) -> pd.DataFrame | None:
     start_time = time.time()
-    logging.info(f"Spectral: processing {geo_code}")
+    logger.info(f"Spectral: processing {geo_code}")
 
     out_path = output_dir / f"Spectral_{geo_code}.csv"
     if out_path.exists() and not overwrite:
@@ -94,8 +94,8 @@ def process_geo_code(
         geo_spectral_df.to_csv(out_path, index=False)
 
         end_time = time.time()
-        logging.info(f"Spectral: {geo_code} — {len(geo_spectral_df)} records in {end_time - start_time:.2f}s")
+        logger.info(f"Spectral: {geo_code} — {len(geo_spectral_df)} records in {end_time - start_time:.2f}s")
         return geo_spectral_df
 
     except Exception as e:
-        logging.error(f"Spectral: error processing {geo_code}: {e}")
+        logger.error(f"Spectral: error processing {geo_code}: {e}")

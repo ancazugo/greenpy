@@ -2,11 +2,11 @@
 Data loading and setup pipeline. All paths and column names come from GreenPyConfig.
 """
 
-import logging
 from pathlib import Path
 
 import pandas as pd
 import geopandas as gpd
+from loguru import logger
 from pyspark.sql.session import SparkSession
 
 from .config.schema import GreenPyConfig
@@ -100,7 +100,7 @@ def load_tables(sedona: SparkSession, cfg: GreenPyConfig) -> dict:
     Load all datasets from paths in cfg, rename columns to canonical names,
     register Spark temp views, and return a dict of named GeoDataFrames.
     """
-    logging.debug("Loading tables from config paths")
+    logger.debug("Loading tables from config paths")
 
     col = cfg.columns
     db_dir = Path(cfg.output.base_dir) / "database"
@@ -156,7 +156,7 @@ def load_tables(sedona: SparkSession, cfg: GreenPyConfig) -> dict:
 
 def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
     """Convert raw input files to parquet, applying canonical column renames."""
-    logging.info("Setting up parquet cache from raw input files")
+    logger.info("Setting up parquet cache from raw input files")
     col = cfg.columns
 
     buildings_gdf = _read_vector(cfg.data.buildings, layer=col.building_layer).to_crs(cfg.crs)
@@ -184,7 +184,7 @@ def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
         road_nodes_gdf = _read_vector(cfg.data.roads, layer=col.road_node_layer).to_crs(cfg.crs)
         road_nodes_gdf = _rename_to_canonical(road_nodes_gdf, cfg)
     else:
-        logging.info("No road nodes file — deriving nodes from edge endpoints")
+        logger.info("No road nodes file — deriving nodes from edge endpoints")
         road_edges_gdf, road_nodes_gdf = _derive_road_nodes(road_edges_gdf)
 
     road_edges_gdf.to_parquet(db_dir / "road_edges.parquet", index=False)
@@ -194,7 +194,7 @@ def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
     census_gdf["area"] = census_gdf.geometry.area / 1_000_000
     census_gdf.to_parquet(db_dir / "census_boundaries.parquet", index=False)
 
-    logging.info("Parquet cache created successfully")
+    logger.info("Parquet cache created successfully")
 
 
 def _filter_parks(parks_sites_gdf: gpd.GeoDataFrame, cfg: GreenPyConfig) -> gpd.GeoDataFrame:

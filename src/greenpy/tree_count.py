@@ -1,9 +1,9 @@
 from pathlib import Path
 
 import time
-import logging
 import pandas as pd
 import geopandas as gpd
+from loguru import logger
 from pyspark.sql.functions import monotonically_increasing_id
 from pyspark.sql.session import SparkSession
 
@@ -23,7 +23,7 @@ def concatenate_trees_for_boundary(
     tree_vector_paths_df: pd.DataFrame | None = None,
 ) -> object:
     """Load tree files for the boundary and register as Spark temp view."""
-    logging.debug(f"Getting trees for {geo_code}")
+    logger.debug(f"Getting trees for {geo_code}")
 
     trees_dir = Path(cfg.data.trees_dir)
 
@@ -69,7 +69,7 @@ def process_geo_code(
     tree_vector_paths_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame | None:
     start_time = time.time()
-    logging.info(f"Tree_count: processing {geo_code}")
+    logger.info(f"Tree_count: processing {geo_code}")
 
     out_path = output_dir / f"Tree_count_{geo_code}.csv"
 
@@ -94,8 +94,8 @@ def process_geo_code(
         geo_tree_count_df = save_temp_file(geo_tree_count_sdf, out_path)
 
         end_time = time.time()
-        logging.info(f"Tree_count: {geo_code} — {geo_tree_count_df['tree_count'].sum()} trees in {end_time - start_time:.2f}s")
+        logger.info(f"Tree_count: {geo_code} — {geo_tree_count_df['tree_count'].sum()} trees in {end_time - start_time:.2f}s")
         return geo_tree_count_df
 
     except Exception as e:
-        logging.error(f"Tree_count: error processing {geo_code}: {e}")
+        logger.error(f"Tree_count: error processing {geo_code}: {e}")

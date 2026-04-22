@@ -1,9 +1,9 @@
 from pathlib import Path
 
 import time
-import logging
 import pandas as pd
 import geopandas as gpd
+from loguru import logger
 from pyspark.sql.dataframe import DataFrame
 from pyspark.sql.session import SparkSession
 from pyspark.sql.functions import monotonically_increasing_id
@@ -17,7 +17,7 @@ def process_vom_tiles(
     sedona: SparkSession, trees_path_lst: list, cfg: GreenPyConfig, tree_area: int = 10, tree_height: int = 3
 ) -> gpd.GeoDataFrame | None:
     """Read and filter tree vector files, register as Spark temp view."""
-    logging.debug(f"Reading {len(trees_path_lst)} tree tile files")
+    logger.debug(f"Reading {len(trees_path_lst)} tree tile files")
 
     if not trees_path_lst:
         return None
@@ -46,7 +46,7 @@ def read_trees_unique(
     tree_area: int = 10, tree_height: int = 3,
 ) -> DataFrame:
     """Load tree files overlapping the boundary, filter by height/area, register as Spark temp view."""
-    logging.debug("Reading tree vector files overlapping boundary")
+    logger.debug("Reading tree vector files overlapping boundary")
 
     col = cfg.columns
 
@@ -60,11 +60,11 @@ def read_trees_unique(
         })
     elif cfg.tile_system.enabled:
         tree_paths = list(trees_dir.glob("*.gpkg"))
-        logging.debug(f"Found {len(tree_paths)} tree tile files")
+        logger.debug(f"Found {len(tree_paths)} tree tile files")
         geo_trees_gdf = pd.concat([gpd.read_file(p) for p in tree_paths], ignore_index=True)
     else:
         tree_paths = find_overlapping_files(geo_boundary_gdf, trees_dir, pattern="*.gpkg")
-        logging.debug(f"Found {len(tree_paths)} tree vector files")
+        logger.debug(f"Found {len(tree_paths)} tree vector files")
         geo_trees_gdf = pd.concat([gpd.read_file(p) for p in tree_paths], ignore_index=True)
     geo_trees_sdf = sedona.createDataFrame(geo_trees_gdf)
     if "geom" in geo_trees_sdf.columns:
@@ -129,7 +129,7 @@ def process_geo_code(
     tree_vector_paths_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame | None:
     start_time = time.time()
-    logging.info(f"T3: processing {geo_code} with buffer {buffer}m")
+    logger.info(f"T3: processing {geo_code} with buffer {buffer}m")
 
     out_path = output_dir / f"T3_{geo_code}_{buffer}m.csv"
 
@@ -143,7 +143,7 @@ def process_geo_code(
         )
 
         if query_method == "sql":
-            logging.debug("Executing T3 query using SQL")
+            logger.debug("Executing T3 query using SQL")
             trees_dir = Path(cfg.data.trees_dir)
             geo_boundary_gdf = gpd.GeoDataFrame(
                 get_geometries(sedona, geo_level, geo_code, dissolve=True).toPandas(),
@@ -156,7 +156,7 @@ def process_geo_code(
             geo_tree_count_df.to_csv(out_path, index=False)
 
         elif query_method == "rdd":
-            logging.debug("Executing T3 query using Spatial RDD")
+            logger.debug("Executing T3 query using Spatial RDD")
             if cfg.tile_system.enabled and overlapping_tiles_lst is not None:
                 trees_dir = Path(cfg.data.trees_dir)
                 # Tile-mode: filter by tile name substrings
@@ -188,8 +188,8 @@ def process_geo_code(
             geo_tree_count_df.to_csv(out_path, index=False)
 
         end_time = time.time()
-        logging.info(f"T3: {geo_code} — {len(geo_tree_count_df)} records in {end_time - start_time:.2f}s")
+        logger.info(f"T3: {geo_code} — {len(geo_tree_count_df)} records in {end_time - start_time:.2f}s")
         return geo_tree_count_df
 
     except Exception as e:
-        logging.error(f"T3: error processing {geo_code}: {e}")
+        logger.error(f"T3: error processing {geo_code}: {e}")

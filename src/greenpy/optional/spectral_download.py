@@ -3,13 +3,13 @@ Download GEE imagery to Google Drive (optional module).
 """
 
 import time
-import logging
+from loguru import logger
 
 import ee  # eemont imported lazily inside get_imagery()
 
 
 def download_imagery(imagery_ic: "ee.Image", output_path: str) -> None:
-    logging.debug(f"Downloading imagery to Google Drive: {output_path}")
+    logger.debug(f"Downloading imagery to Google Drive: {output_path}")
 
     task = ee.batch.Export.image.toDrive(
         image=imagery_ic,
@@ -23,13 +23,13 @@ def download_imagery(imagery_ic: "ee.Image", output_path: str) -> None:
     )
     task.start()
 
-    logging.info("Export task started. Waiting for completion...")
+    logger.info("Export task started. Waiting for completion...")
     while task.status()["state"] in ["READY", "RUNNING"]:
-        logging.info(f"Task status: {task.status()['state']}")
+        logger.info(f"Task status: {task.status()['state']}")
         time.sleep(30)
 
     if task.status()["state"] == "COMPLETED":
-        logging.info("Download completed successfully!")
+        logger.info("Download completed successfully!")
     else:
         raise RuntimeError(f"Download failed: {task.status()}")
 

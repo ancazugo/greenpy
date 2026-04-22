@@ -1,5 +1,5 @@
 import os
-import logging
+from loguru import logger
 from sedona.spark import SedonaContext
 from pyspark.sql.session import SparkSession
 
@@ -7,7 +7,7 @@ from .constants import JAVA_HOME
 
 
 def get_spark() -> SparkSession:
-    logging.debug("Setting up Apache Sedona")
+    logger.debug("Setting up Apache Sedona")
 
     if JAVA_HOME:
         os.environ["JAVA_HOME"] = JAVA_HOME

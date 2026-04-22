@@ -4,8 +4,8 @@ Requires tile_system.enabled = True in config.
 """
 
 import re
-import logging
 import pandas as pd
+from loguru import logger
 from pathlib import Path
 
 from pyspark.sql.functions import udf
@@ -73,7 +73,7 @@ def translate_tile_name(tile_name: str) -> str:
 
 def generate_vom_paths_df(sedona: SparkSession, chm_tiles_dir: Path, tile_name_pattern: str = r"VOM_([A-Z]{2}\d{4})_") -> pd.DataFrame:
     """Scan VOM raster directory and return a metadata DataFrame."""
-    logging.debug("Generating VOM paths DataFrame")
+    logger.debug("Generating VOM paths DataFrame")
 
     vom_sdf = sedona.read.format("binaryFile").load(f"{str(chm_tiles_dir)}/*/*.tif")
     vom_sdf.createOrReplaceTempView("vom")
@@ -97,7 +97,7 @@ def generate_tree_paths_df(
     file_pattern: str = r"VOM_trees_([A-Z]{2}\d{4})_(\d{4})\.gpkg",
 ) -> pd.DataFrame:
     """Scan tree vector directory and return a metadata DataFrame."""
-    logging.debug("Generating tree paths DataFrame")
+    logger.debug("Generating tree paths DataFrame")
 
     tree_paths = list(trees_dir.glob("*.gpkg"))
     metadata = []

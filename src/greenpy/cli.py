@@ -4,12 +4,12 @@ greenpy CLI — measure the 3-30-300 rule of urban greening.
 """
 
 import inspect
-import logging
 import concurrent.futures
 from pathlib import Path
 from typing import Optional
 
 import typer
+from loguru import logger
 from tqdm import tqdm
 
 from .config.loader import load_config
@@ -80,7 +80,7 @@ def run(
         from .merge import merge_output_csv, process_data
         sedona = get_spark()
         merge_output_csv(sedona, cfg, t3_buffers)
-        process_data(sedona, cfg, geo_level or geo_levels[-2], sub_geo_level or geo_levels[-1], t3_buffers)
+        process_data(sedona, cfg, geo_level or (geo_levels[-2] if len(geo_levels) > 1 else geo_levels[0]), sub_geo_level or geo_levels[-1], t3_buffers)
         return
 
     if process == "Spectral":
@@ -91,7 +91,7 @@ def run(
         codes = [geo_code] if geo_code else tables["census_boundaries_gdf"][geo_level].unique()
         for code in tqdm(codes, desc="Regions"):
             process_spectral(
-                code, geo_level, sub_geo_level or geo_levels[-1],
+                code, geo_level, sub_geo_level or geo_levels[0],
                 imagery_ee_path, start_date, end_date, cloud_coverage,
                 spectral_indexes, overwrite=overwrite,
             )
@@ -120,7 +120,7 @@ def run(
     }
 
     codes = [geo_code] if geo_code else tables["census_boundaries_gdf"][geo_level or geo_levels[0]].unique()
-    logging.info(f"Running {process} for {len(codes)} regions")
+    logger.info(f"Running {process} for {len(codes)} regions")
 
     if parallel:
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as executor:
@@ -131,7 +131,7 @@ def run(
         for code in tqdm(codes, desc="Regions"):
             _run_process(process, args_dict, code)
 
-    logging.info(f"{process} completed for {len(codes)} regions")
+    logger.info(f"{process} completed for {len(codes)} regions")
 
 
 def main():

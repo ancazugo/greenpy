@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import time
-import logging
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -9,6 +8,7 @@ import xarray as xr
 import rioxarray as rxr
 from rioxarray.merge import merge_arrays
 from rasterstats import zonal_stats
+from loguru import logger
 from pyspark.sql.session import SparkSession
 
 from .config.schema import GreenPyConfig
@@ -17,7 +17,7 @@ from .utils.data_processing import get_geometries, get_sub_geo_boundaries, find_
 
 def binarise_tiles(chm_paths_lst: list, low_threshold: float, high_threshold: float) -> xr.DataArray:
     """Merge CHM raster tiles and binarise to a canopy/no-canopy mask."""
-    logging.info(f"Binarising {len(chm_paths_lst)} CHM tiles")
+    logger.info(f"Binarising {len(chm_paths_lst)} CHM tiles")
 
     chm_xr_lst = []
     for file in chm_paths_lst:
@@ -26,7 +26,7 @@ def binarise_tiles(chm_paths_lst: list, low_threshold: float, high_threshold: fl
             temp_rast.values
             chm_xr_lst.append(temp_rast)
         except Exception as e:
-            logging.error(f"Error reading {file}: {e}")
+            logger.error(f"Error reading {file}: {e}")
 
     merged_chm_xr = merge_arrays(chm_xr_lst)
     binary = (merged_chm_xr >= low_threshold) & (merged_chm_xr <= high_threshold)
@@ -35,7 +35,7 @@ def binarise_tiles(chm_paths_lst: list, low_threshold: float, high_threshold: fl
 
 def get_canopy_cover_raster(subgeo_gdf: gpd.GeoDataFrame, binary_chm_xr: xr.DataArray) -> gpd.GeoDataFrame:
     """Zonal statistics-based canopy cover from a binary CHM raster."""
-    logging.debug("Calculating canopy cover from raster")
+    logger.debug("Calculating canopy cover from raster")
 
     zs = zonal_stats(
         subgeo_gdf,
@@ -57,7 +57,7 @@ def get_canopy_cover_vector(subgeo_gdf: gpd.GeoDataFrame, trees_gdf: gpd.GeoData
     Uses `tree_area` column when trees are points with a stored area; otherwise
     computes from polygon geometry.
     """
-    logging.debug("Calculating canopy cover from tree vectors")
+    logger.debug("Calculating canopy cover from tree vectors")
 
     subgeo_gdf = subgeo_gdf.copy()
     tree_clip = gpd.clip(trees_gdf, subgeo_gdf)
@@ -93,7 +93,7 @@ def process_geo_code(
     overwrite: bool = True,
 ) -> pd.DataFrame | None:
     start_time = time.time()
-    logging.info(f"T30: processing {geo_code}")
+    logger.info(f"T30: processing {geo_code}")
 
     out_path = output_dir / f"T30_{geo_code}.csv"
 
@@ -132,8 +132,8 @@ def process_geo_code(
         geo_canopy_cover_df.to_csv(out_path, index=False)
 
         end_time = time.time()
-        logging.info(f"T30: {geo_code} — {len(geo_canopy_cover_df)} records in {end_time - start_time:.2f}s")
+        logger.info(f"T30: {geo_code} — {len(geo_canopy_cover_df)} records in {end_time - start_time:.2f}s")
         return geo_canopy_cover_df
 
     except Exception as e:
-        logging.error(f"T30: error processing {geo_code}: {e}")
+        logger.error(f"T30: error processing {geo_code}: {e}")

@@ -1,11 +1,11 @@
 from pathlib import Path
 
 import time
-import logging
 import pandas as pd
 import geopandas as gpd
 import networkx as nx
 import osmnx as ox
+from loguru import logger
 from tqdm import tqdm
 from pyspark.sql.session import SparkSession
 
@@ -28,7 +28,7 @@ def filter_features(
     Buildings are filtered to the exact OA boundary. Roads and parks use a
     buffered boundary so the network can route to parks outside the OA.
     """
-    logging.debug("Filtering GeoDataFrames by spatial join")
+    logger.debug("Filtering GeoDataFrames by spatial join")
 
     buffered = geo_boundary_gdf.copy()
     buffered["geometry"] = geo_boundary_gdf.geometry.buffer(search_buffer)
@@ -74,7 +74,7 @@ def get_road_graph_distances(
     geo_buildings_gdf: gpd.GeoDataFrame,
 ) -> tuple:
     """Build road network graph and snap buildings + park accesses to nearest nodes."""
-    logging.debug("Generating road graph")
+    logger.debug("Generating road graph")
 
     geo_graph = ox.graph_from_gdfs(geo_road_nodes_gdf, geo_road_edges_gdf).to_undirected()
 
@@ -107,7 +107,7 @@ def get_closest_park_manhattan(
     geo_park_access_gdf: gpd.GeoDataFrame,
 ) -> pd.DataFrame:
     """Shortest-path (Dijkstra) distance from each building to nearest park access point."""
-    logging.debug(f"Computing park distances for {len(geo_buildings_gdf)} buildings, {len(geo_park_access_gdf)} access points")
+    logger.debug(f"Computing park distances for {len(geo_buildings_gdf)} buildings, {len(geo_park_access_gdf)} access points")
 
     park_access_nodes = geo_park_access_gdf["nearest_road_node"].unique()
     shortest_paths = {}
@@ -172,7 +172,7 @@ def process_geo_code(
     overwrite: bool = True,
 ) -> pd.DataFrame | None:
     start_time = time.time()
-    logging.info(f"T300: processing {geo_code}")
+    logger.info(f"T300: processing {geo_code}")
 
     out_path = output_dir / f"T300_{geo_code}.csv"
 
@@ -212,8 +212,8 @@ def process_geo_code(
         geo_park_distance_df.to_csv(out_path, index=False)
 
         end_time = time.time()
-        logging.info(f"T300: {geo_code} — {len(geo_park_distance_df)} records in {end_time - start_time:.2f}s")
+        logger.info(f"T300: {geo_code} — {len(geo_park_distance_df)} records in {end_time - start_time:.2f}s")
         return geo_park_distance_df
 
     except Exception as e:
-        logging.error(f"T300: error processing {geo_code}: {e}")
+        logger.error(f"T300: error processing {geo_code}: {e}")

@@ -2,11 +2,11 @@
 Final aggregation pipeline: merges T3, T30, T300, spectral, and tree count outputs.
 """
 
-import logging
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 from pyspark.sql.dataframe import DataFrame
 from pyspark.sql.session import SparkSession
 
@@ -16,7 +16,7 @@ from .utils.data_processing import save_temp_file
 
 def merge_output_csv(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: list[int], file_format: str = "parquet") -> None:
     """Merge per-geo CSV files from each module into consolidated parquet files."""
-    logging.info("Merging module CSV outputs into parquet")
+    logger.info("Merging module CSV outputs into parquet")
 
     db_dir = Path(cfg.output.base_dir) / "database"
     base = Path(cfg.output.base_dir)
@@ -157,7 +157,7 @@ def process_data(
     if t3_buffer_lst is None:
         t3_buffer_lst = [10, 25, 50, 75, 100]
 
-    logging.info("Starting merge pipeline")
+    logger.info("Starting merge pipeline")
 
     read_parquet_files(sedona, cfg, t3_buffer_lst)
     aggregate_t30(sedona, geo_level)
@@ -184,5 +184,5 @@ def process_data(
     db_dir = Path(cfg.output.base_dir) / "database"
     result_df.to_parquet(db_dir / "T3_30_300_spectral.parquet", index=False)
 
-    logging.info("Merge pipeline completed")
+    logger.info("Merge pipeline completed")
     return result_df

@@ -1,14 +1,11 @@
-import logging
+import sys
 from pathlib import Path
 
+from loguru import logger
 
-def setup_logger(log_path: str | Path, log_level: str = logging.WARNING) -> None:
-    logging.basicConfig(
-        filename=log_path,
-        encoding="utf-8",
-        filemode="a",
-        format="%(asctime)s - %(levelname)s - %(message)s",
-        style="%",
-        datefmt="%Y-%m-%d %H:%M",
-        level=log_level,
-    )
+
+def setup_logger(log_path: str | Path, log_level: str = "WARNING") -> None:
+    fmt = "{time:YYYY-MM-DD HH:mm} - {level} - {message}"
+    logger.remove()
+    logger.add(sys.stderr, level=log_level, format=fmt)
+    logger.add(log_path, level=log_level, encoding="utf-8", format=fmt)

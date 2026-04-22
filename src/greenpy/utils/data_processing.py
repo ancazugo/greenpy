@@ -1,7 +1,7 @@
-import logging
 import shutil
 import tempfile
 import pandas as pd
+from loguru import logger
 import geopandas as gpd
 from pathlib import Path
 from pyspark.sql.session import SparkSession
@@ -23,7 +23,7 @@ def find_overlapping_files(boundary_gdf: gpd.GeoDataFrame, files_dir: Path, patt
             bbox = gpd.read_file(p, rows=0).total_bounds  # fast: reads no features
             extents.append({"path": p, "minx": bbox[0], "miny": bbox[1], "maxx": bbox[2], "maxy": bbox[3]})
         except Exception as e:
-            logging.warning(f"Could not read extent of {p}: {e}")
+            logger.warning(f"Could not read extent of {p}: {e}")
 
     if not extents:
         return []
@@ -57,7 +57,7 @@ def find_overlapping_rasters(boundary_gdf: gpd.GeoDataFrame, files_dir: Path, pa
             if bbox_geom.intersects(dissolved):
                 result.append(p)
         except Exception as e:
-            logging.warning(f"Could not read bounds of {p}: {e}")
+            logger.warning(f"Could not read bounds of {p}: {e}")
     return result
 
 
