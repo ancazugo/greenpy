@@ -12,7 +12,7 @@ from rasterstats import zonal_stats
 from pyspark.sql.session import SparkSession
 
 from .config.schema import GreenPyConfig
-from .utils.data_processing import get_geometries, find_overlapping_rasters
+from .utils.data_processing import get_geometries, get_sub_geo_boundaries, find_overlapping_rasters
 
 
 def binarise_tiles(chm_paths_lst: list, low_threshold: float, high_threshold: float) -> xr.DataArray:
@@ -85,6 +85,7 @@ def process_geo_code(
     sedona: SparkSession,
     geo_level: str,
     geo_code: str,
+    sub_geo_level: str,
     cfg: GreenPyConfig,
     output_dir: Path,
     low_threshold: int = 3,
@@ -100,11 +101,8 @@ def process_geo_code(
         return pd.read_csv(out_path)
 
     try:
-        geo_boundary_sdf = get_geometries(sedona, geo_level, geo_code, dissolve=False)
+        geo_boundary_sdf = get_sub_geo_boundaries(sedona, geo_level, geo_code, sub_geo_level)
         geo_boundary_gdf = gpd.GeoDataFrame(geo_boundary_sdf.toPandas(), geometry="geometry", crs=cfg.crs)
-
-        geo_levels = cfg.columns.geo_levels
-        output_cols = geo_levels + ["canopy_cover", "total_pixels"]
 
         if cfg.data.chm_tiles_dir:
             chm_dir = Path(cfg.data.chm_tiles_dir)
@@ -130,9 +128,7 @@ def process_geo_code(
         else:
             raise ValueError("Neither chm_tiles_dir nor trees_dir is configured — cannot compute T30")
 
-        # Keep only geo columns that exist in this geography
-        present_geo_cols = [c for c in geo_levels if c in geo_canopy_cover_df.columns]
-        geo_canopy_cover_df = geo_canopy_cover_df[present_geo_cols + ["canopy_cover", "total_pixels"]]
+        geo_canopy_cover_df = geo_canopy_cover_df[[sub_geo_level, "canopy_cover", "total_pixels"]]
         geo_canopy_cover_df.to_csv(out_path, index=False)
 
         end_time = time.time()

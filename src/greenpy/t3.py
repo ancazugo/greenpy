@@ -95,11 +95,27 @@ def count_trees(sedona: SparkSession) -> pd.DataFrame:
     return trees_within_buffer_sdf.toPandas()
 
 
+def _attach_sub_geo_level(
+    sedona, geo_tree_count_df: pd.DataFrame, geo_level: str, geo_code: str, sub_geo_level: str
+) -> pd.DataFrame:
+    """Join sub_geo_level column onto per-building results using geo_buildings Spark view."""
+    building_level_df = sedona.sql(
+        f"""
+        SELECT b.building_id, bnd.{sub_geo_level}
+        FROM geo_buildings b
+        JOIN boundaries bnd ON ST_Contains(bnd.geometry, ST_Centroid(b.geometry))
+        WHERE bnd.{geo_level} = '{geo_code}'
+        """
+    ).toPandas()
+    return geo_tree_count_df.merge(building_level_df, on="building_id", how="left")
+
+
 def process_geo_code(
     sedona: SparkSession,
     query_method: str,
     geo_level: str,
     geo_code: str,
+    sub_geo_level: str,
     cfg: GreenPyConfig,
     output_dir: Path,
     buffer: int = 100,
@@ -136,6 +152,7 @@ def process_geo_code(
             read_trees_unique(sedona, trees_dir, geo_boundary_gdf, cfg, tree_area, tree_height)
             geo_tree_count_df = count_trees(sedona)
             geo_tree_count_df.rename(columns={"tree_count": f"tree_count_{buffer}m"}, inplace=True)
+            geo_tree_count_df = _attach_sub_geo_level(sedona, geo_tree_count_df, geo_level, geo_code, sub_geo_level)
             geo_tree_count_df.to_csv(out_path, index=False)
 
         elif query_method == "rdd":
@@ -167,6 +184,8 @@ def process_geo_code(
             geo_tree_count_sdf = count_trees_rdd(sedona, geo_buildings_buffer_rdd, geo_trees_rdd, "building_id", using_index=True)
             geo_tree_count_df = save_temp_file(geo_tree_count_sdf, out_path)
             geo_tree_count_df.rename(columns={"tree_count": f"tree_count_{buffer}m"}, inplace=True)
+            geo_tree_count_df = _attach_sub_geo_level(sedona, geo_tree_count_df, geo_level, geo_code, sub_geo_level)
+            geo_tree_count_df.to_csv(out_path, index=False)
 
         end_time = time.time()
         logging.info(f"T3: {geo_code} — {len(geo_tree_count_df)} records in {end_time - start_time:.2f}s")

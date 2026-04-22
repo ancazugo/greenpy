@@ -103,6 +103,35 @@ def get_geometries(sedona: SparkSession, geo_level: str, geo_code: str, dissolve
     return geo_boundary_sdf
 
 
+def get_sub_geo_boundaries(
+    sedona: SparkSession, geo_level: str, geo_code: str, sub_geo_level: str
+) -> DataFrame:
+    """Return one dissolved geometry per sub_geo_level unit within geo_level = geo_code.
+
+    Also refreshes the 'geo_boundary' temp view (whole-region dissolve) so that
+    filter_buffer_geometries() continues to work correctly.
+    """
+    sdf = sedona.sql(
+        f"""
+        SELECT {sub_geo_level}, ST_Union_Aggr(geometry) AS geometry
+        FROM boundaries
+        WHERE {geo_level} = '{geo_code}'
+        GROUP BY {sub_geo_level}
+        """
+    )
+    sdf.createOrReplaceTempView("geo_sub_boundaries")
+
+    sedona.sql(
+        f"""
+        SELECT ST_Union_Aggr(geometry) AS geometry
+        FROM boundaries
+        WHERE {geo_level} = '{geo_code}'
+        """
+    ).createOrReplaceTempView("geo_boundary")
+
+    return sdf
+
+
 def save_csv_as_parquet(in_directory: Path, path_pattern: str, out_path: Path) -> pd.DataFrame:
     csv_files = list(in_directory.glob(path_pattern))
     dataframes_lst = [pd.read_csv(file) for file in csv_files]

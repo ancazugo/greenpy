@@ -164,6 +164,7 @@ def process_geo_code(
     sedona: SparkSession,
     geo_level: str,
     geo_code: str,
+    sub_geo_level: str,
     road_nodes_gdf: gpd.GeoDataFrame,
     road_edges_gdf: gpd.GeoDataFrame,
     cfg: GreenPyConfig,
@@ -191,6 +192,23 @@ def process_geo_code(
         geo_park_distance_df = get_closest_park(
             sedona, geo_graph, geo_buildings_gdf, geo_park_access_gdf, geo_park_sites_gdf
         )
+        sub_geo_gdf = gpd.GeoDataFrame(
+            sedona.sql(
+                f"""
+                SELECT {sub_geo_level}, ST_Union_Aggr(geometry) AS geometry
+                FROM boundaries WHERE {geo_level} = '{geo_code}'
+                GROUP BY {sub_geo_level}
+                """
+            ).toPandas(),
+            geometry="geometry", crs=cfg.crs,
+        )
+        buildings_with_level = gpd.sjoin(
+            geo_buildings_gdf[["building_id", "geometry"]].copy(),
+            sub_geo_gdf[[sub_geo_level, "geometry"]],
+            how="left",
+        ).drop(columns=["index_right"], errors="ignore")[["building_id", sub_geo_level]]
+        geo_park_distance_df = geo_park_distance_df.merge(buildings_with_level, on="building_id", how="left")
+
         geo_park_distance_df.to_csv(out_path, index=False)
 
         end_time = time.time()
