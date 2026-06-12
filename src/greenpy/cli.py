@@ -24,7 +24,14 @@ from . import tree_count as tree_count_module
 app = typer.Typer(help="greenpy: 3-30-300 urban greening metrics")
 
 
+@app.callback()
+def _callback():
+    """greenpy: 3-30-300 urban greening metrics."""
+    # Forces typer to keep `run` as a named subcommand even while it is the only one.
+
+
 def _run_process(process: str, args_dict: dict, geo_code: str) -> object:
+    """Dispatch one geo_code to the module's process_geo_code, passing only the kwargs it accepts."""
     process_fns = {
         "T3": t3_module.process_geo_code,
         "T30": t30_module.process_geo_code,
@@ -49,6 +56,9 @@ def run(
     buffer: int = typer.Option(100, "--buffer", help="Tree count buffer radius in metres (T3)"),
     tree_area: int = typer.Option(10, "--tree_area", help="Minimum tree canopy area (m²)"),
     tree_height: int = typer.Option(3, "--tree_height", help="Minimum tree height (m)"),
+    low_threshold: int = typer.Option(3, "--low_threshold", help="Min canopy height in metres for T30 binarisation"),
+    high_threshold: int = typer.Option(60, "--high_threshold", help="Max canopy height in metres for T30 binarisation"),
+    gee_scale: float = typer.Option(1.0, "--gee_scale", help="Download scale in metres for the T30 GEE canopy source"),
     start_date: str = typer.Option("2024-01-01", "--start_date", help="GEE imagery start date"),
     end_date: str = typer.Option("2024-12-31", "--end_date", help="GEE imagery end date"),
     imagery_ee_path: str = typer.Option("COPERNICUS/S2_HARMONIZED", "--imagery_ee_path", help="GEE imagery collection path"),
@@ -58,8 +68,17 @@ def run(
     parallel: bool = typer.Option(False, "--parallel", is_flag=True, help="Run geo codes in parallel"),
     n_workers: int = typer.Option(2, "--n_workers", help="Number of parallel workers"),
     log_level: str = typer.Option("INFO", "--log_level", help="Logging level"),
-    overwrite: bool = typer.Option(True, "--overwrite", is_flag=True, help="Overwrite existing output files"),
+    overwrite: bool = typer.Option(True, "--overwrite/--no-overwrite", help="Overwrite existing output files (--no-overwrite resumes, returning cached CSVs)"),
 ):
+    """Run one greenpy module over a study area.
+
+    T3, T30, T300 and Tree_count iterate over every code of --geo_level
+    (default: the coarsest level in config.columns.geo_levels) and write one
+    CSV per code, aggregated at --sub_geo_level (default: the finest level).
+    Spectral does the same via Google Earth Engine. Merge consolidates all
+    module CSVs into `<output.base_dir>/database/T3_30_300_spectral.parquet`
+    and must run last.
+    """
     cfg = load_config(config)
     geo_levels = cfg.columns.geo_levels
 
@@ -85,15 +104,22 @@ def run(
 
     if process == "Spectral":
         from .optional.spectral import setup_gee, process_geo_code as process_spectral
+        if not cfg.gee_boundaries_asset:
+            typer.echo("Error: Spectral requires gee_boundaries_asset in the config", err=True)
+            raise typer.Exit(1)
         sedona = get_spark()
         tables = load_tables(sedona, cfg)
-        setup_gee()
-        codes = [geo_code] if geo_code else tables["census_boundaries_gdf"][geo_level].unique()
+        setup_gee(cfg.gee_project)
+        spectral_geo_level = geo_level or geo_levels[0]
+        codes = [geo_code] if geo_code else tables["census_boundaries_gdf"][spectral_geo_level].unique()
         for code in tqdm(codes, desc="Regions"):
             process_spectral(
-                code, geo_level, sub_geo_level or geo_levels[0],
+                code, spectral_geo_level, sub_geo_level or geo_levels[-1],
                 imagery_ee_path, start_date, end_date, cloud_coverage,
-                spectral_indexes, overwrite=overwrite,
+                spectral_indexes,
+                output_dir=tables["output_dirs"]["spectral"],
+                gee_boundaries_asset=cfg.gee_boundaries_asset,
+                overwrite=overwrite,
             )
         return
 
@@ -114,6 +140,9 @@ def run(
         "buffer": buffer,
         "tree_area": tree_area,
         "tree_height": tree_height,
+        "low_threshold": low_threshold,
+        "high_threshold": high_threshold,
+        "gee_scale": gee_scale,
         "overwrite": overwrite,
         "road_nodes_gdf": tables.get("road_nodes_gdf"),
         "road_edges_gdf": tables.get("road_edges_gdf"),

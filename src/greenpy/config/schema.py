@@ -42,6 +42,8 @@ class DataPaths:
     road_nodes: str | None = None
     trees_dir: str | None = None
     chm_tiles_dir: str | None = None
+    # GEE canopy-height asset (e.g. projects/sat-io/open-datasets/facebook/meta-canopy-height)
+    canopy_height_ee_path: str | None = None
 
 
 @dataclass

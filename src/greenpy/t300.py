@@ -10,7 +10,8 @@ from tqdm import tqdm
 from pyspark.sql.session import SparkSession
 
 from .config.schema import GreenPyConfig
-from .utils.data_processing import filter_buffer_geometries, get_geometries
+from .pipeline import _filter_parks, _filter_park_access
+from .utils.data_processing import filter_buffer_geometries, get_geometries, drop_geo_views
 
 
 def filter_features(
@@ -51,15 +52,20 @@ def filter_features(
     geo_buildings_sdf = filter_buffer_geometries(sedona, geo_level, geo_code, "buildings", id_col="building_id")
     geo_buildings_gdf = gpd.GeoDataFrame(geo_buildings_sdf.toPandas(), geometry="geometry", crs=cfg.crs)
 
-    # Parks and access points: use buffered boundary so nearby parks are reachable
+    # Parks and access points: use buffered boundary so nearby parks are reachable.
+    # Apply the same function/linkage filters that load_tables() applies.
+    db_dir = Path(cfg.output.base_dir) / "database"
+    park_sites_all = _filter_parks(gpd.read_parquet(db_dir / "parks_sites.parquet"), cfg)
+    park_access_all = _filter_park_access(gpd.read_parquet(db_dir / "parks_access.parquet"), park_sites_all, cfg)
+
     geo_park_sites_gdf = gpd.sjoin(
-        gpd.read_parquet(Path(cfg.output.base_dir) / "database" / "parks_sites.parquet"),
+        park_sites_all,
         buffered.drop(columns=[c for c in buffered.columns if c not in ("geometry",)]),
         how="inner",
     ).drop(columns=["index_right"], errors="ignore")
 
     geo_park_access_gdf = gpd.sjoin(
-        gpd.read_parquet(Path(cfg.output.base_dir) / "database" / "parks_access.parquet"),
+        park_access_all,
         buffered.drop(columns=[c for c in buffered.columns if c not in ("geometry",)]),
         how="inner",
     ).drop(columns=["index_right"], errors="ignore")
@@ -106,7 +112,13 @@ def get_closest_park_manhattan(
     geo_buildings_gdf: gpd.GeoDataFrame,
     geo_park_access_gdf: gpd.GeoDataFrame,
 ) -> pd.DataFrame:
-    """Shortest-path (Dijkstra) distance from each building to nearest park access point."""
+    """Network shortest-path (Dijkstra) distance from each building to its nearest park access point.
+
+    Despite the historical name and output column (`distance_manhattan`, kept
+    for compatibility), this is road-network distance weighted by
+    road_edge_length, plus the straight-line snap distances of building and
+    access point to their nearest road nodes. Unreachable buildings get None.
+    """
     logger.debug(f"Computing park distances for {len(geo_buildings_gdf)} buildings, {len(geo_park_access_gdf)} access points")
 
     park_access_nodes = geo_park_access_gdf["nearest_road_node"].unique()
@@ -130,7 +142,8 @@ def get_closest_park_manhattan(
                 if d < min_distance:
                     min_distance = d
                     closest_park_access_id = park_access.park_id
-            except Exception:
+            except KeyError:
+                # building node unreachable from this park access node
                 pass
 
         distances.append((building_id, closest_park_access_id, None if min_distance == float("inf") else round(min_distance, 1)))
@@ -145,6 +158,8 @@ def get_closest_park_euclidean(
     """Euclidean (straight-line) distance from each building to nearest park site polygon."""
     result = gpd.sjoin_nearest(geo_buildings_gdf, geo_park_sites_gdf, distance_col="distance_euclidean")
     result["distance_euclidean"] = result["distance_euclidean"].round(1)
+    # sjoin_nearest returns one row per tied nearest park — keep one per building
+    result = result.drop_duplicates(subset="building_id")
     return result[["building_id", "park_id", "distance_euclidean"]].rename(columns={"park_id": "closest_park_site_id"})
 
 
@@ -155,6 +170,7 @@ def get_closest_park(
     geo_park_access_gdf: gpd.GeoDataFrame,
     geo_park_sites_gdf: gpd.GeoDataFrame,
 ) -> pd.DataFrame:
+    """Combine network and Euclidean nearest-park distances into one row per building."""
     manhattan_df = get_closest_park_manhattan(geo_graph, geo_buildings_gdf, geo_park_access_gdf)
     euclidean_df = get_closest_park_euclidean(geo_buildings_gdf, geo_park_sites_gdf)
     return pd.merge(manhattan_df, euclidean_df, on="building_id")
@@ -171,6 +187,13 @@ def process_geo_code(
     output_dir: Path,
     overwrite: bool = True,
 ) -> pd.DataFrame | None:
+    """Compute T300 (distance from each building to its nearest park) for one geo_code.
+
+    Writes `T300_<geo_code>.csv` with columns building_id,
+    closest_park_access_id, distance_manhattan (network distance),
+    closest_park_site_id, distance_euclidean, <sub_geo_level>. Returns the
+    DataFrame, the cached CSV when overwrite is False, or None on error.
+    """
     start_time = time.time()
     logger.info(f"T300: processing {geo_code}")
 
@@ -202,11 +225,14 @@ def process_geo_code(
             ).toPandas(),
             geometry="geometry", crs=cfg.crs,
         )
+        # Representative points so a building straddling a sub-geo border maps to one unit
+        building_points_gdf = geo_buildings_gdf[["building_id", "geometry"]].copy()
+        building_points_gdf["geometry"] = building_points_gdf.representative_point()
         buildings_with_level = gpd.sjoin(
-            geo_buildings_gdf[["building_id", "geometry"]].copy(),
+            building_points_gdf,
             sub_geo_gdf[[sub_geo_level, "geometry"]],
             how="left",
-        ).drop(columns=["index_right"], errors="ignore")[["building_id", sub_geo_level]]
+        ).drop_duplicates(subset="building_id")[["building_id", sub_geo_level]]
         geo_park_distance_df = geo_park_distance_df.merge(buildings_with_level, on="building_id", how="left")
 
         geo_park_distance_df.to_csv(out_path, index=False)
@@ -215,5 +241,8 @@ def process_geo_code(
         logger.info(f"T300: {geo_code} — {len(geo_park_distance_df)} records in {end_time - start_time:.2f}s")
         return geo_park_distance_df
 
-    except Exception as e:
-        logger.error(f"T300: error processing {geo_code}: {e}")
+    except Exception:
+        logger.exception(f"T300: error processing {geo_code}")
+        return None
+    finally:
+        drop_geo_views(sedona, geo_code)

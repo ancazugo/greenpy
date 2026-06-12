@@ -42,6 +42,7 @@ def load_config(path: str | Path) -> GreenPyConfig:
             road_nodes=data_raw.get("road_nodes"),
             trees_dir=data_raw.get("trees_dir"),
             chm_tiles_dir=data_raw.get("chm_tiles_dir"),
+            canopy_height_ee_path=data_raw.get("canopy_height_ee_path"),
         ),
         columns=ColumnMapping(
             building_id=columns_raw["building_id"],

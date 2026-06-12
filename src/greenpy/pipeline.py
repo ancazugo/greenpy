@@ -21,23 +21,14 @@ def _read_vector(path: str, layer: str | None = None) -> gpd.GeoDataFrame:
     return gpd.read_file(p, **kwargs)
 
 
-def _rename_to_canonical(gdf: gpd.GeoDataFrame, cfg: GreenPyConfig) -> gpd.GeoDataFrame:
-    """Rename user-supplied column names to internal canonical names."""
-    col = cfg.columns
-    rename = {
-        col.building_id: "building_id",
-        col.road_node_id: "road_node_id",
-        col.road_edge_start: "road_edge_start",
-        col.road_edge_end: "road_edge_end",
-        col.road_edge_length: "road_edge_length",
-        col.park_id: "park_id",
-        col.tree_height_col: "tree_height",
-        col.tree_area_col: "tree_area",
-        col.tree_id_col: "tree_id",
-    }
-    if col.park_access_ref_col:
-        rename[col.park_access_ref_col] = "park_access_ref"
-    return gdf.rename(columns={k: v for k, v in rename.items() if k in gdf.columns})
+def _rename_columns(gdf: gpd.GeoDataFrame, mapping: dict[str | None, str]) -> gpd.GeoDataFrame:
+    """Rename user-supplied column names to internal canonical names.
+
+    Renames are applied per dataset (one mapping per file) because different
+    config columns may share the same source name (e.g. road_node_id and
+    park_id both defaulting to 'id').
+    """
+    return gdf.rename(columns={k: v for k, v in mapping.items() if k and k in gdf.columns})
 
 
 def setup_output_dirs(cfg: GreenPyConfig) -> dict[str, Path]:
@@ -67,10 +58,15 @@ def _derive_road_nodes(edges_gdf: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, g
     end_ids: list[int] = []
 
     for geom in edges_gdf.geometry:
-        coords = list(geom.coords)
+        if geom.geom_type == "MultiLineString":
+            start_pt = geom.geoms[0].coords[0]
+            end_pt = geom.geoms[-1].coords[-1]
+        else:
+            coords = list(geom.coords)
+            start_pt, end_pt = coords[0], coords[-1]
         # round to nearest decimetre to merge near-duplicate endpoints
-        s = (round(coords[0][0], 1), round(coords[0][1], 1))
-        e = (round(coords[-1][0], 1), round(coords[-1][1], 1))
+        s = (round(start_pt[0], 1), round(start_pt[1], 1))
+        e = (round(end_pt[0], 1), round(end_pt[1], 1))
         for coord in (s, e):
             if coord not in coord_to_id:
                 nid = len(coord_to_id)
@@ -103,7 +99,8 @@ def load_tables(sedona: SparkSession, cfg: GreenPyConfig) -> dict:
     logger.debug("Loading tables from config paths")
 
     col = cfg.columns
-    db_dir = Path(cfg.output.base_dir) / "database"
+    dirs = setup_output_dirs(cfg)
+    db_dir = dirs["database"]
 
     buildings_parquet = db_dir / "buildings.parquet"
     parks_sites_parquet = db_dir / "parks_sites.parquet"
@@ -141,8 +138,6 @@ def load_tables(sedona: SparkSession, cfg: GreenPyConfig) -> dict:
     park_access_sdf = sedona.createDataFrame(_coerce_null_columns(park_access_filtered))
     park_access_sdf.createOrReplaceTempView("public_park_accesses")
 
-    dirs = setup_output_dirs(cfg)
-
     return {
         "census_boundaries_gdf": census_boundaries_gdf,
         "buildings_gdf": buildings_gdf,
@@ -160,7 +155,7 @@ def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
     col = cfg.columns
 
     buildings_gdf = _read_vector(cfg.data.buildings, layer=col.building_layer).to_crs(cfg.crs)
-    buildings_gdf = _rename_to_canonical(buildings_gdf, cfg)
+    buildings_gdf = _rename_columns(buildings_gdf, {col.building_id: "building_id"})
     buildings_gdf.to_parquet(db_dir / "buildings.parquet", index=False)
 
     parks_sites_gdf = _read_vector(cfg.data.parks_sites).to_crs(cfg.crs)
@@ -173,16 +168,23 @@ def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
         parks_access_gdf = parks_access_gdf.rename(columns={col.park_access_ref_col: "park_access_ref"})
     parks_access_gdf.to_parquet(db_dir / "parks_access.parquet", index=False)
 
+    edge_renames = {
+        col.road_edge_start: "road_edge_start",
+        col.road_edge_end: "road_edge_end",
+        col.road_edge_length: "road_edge_length",
+    }
+    node_renames = {col.road_node_id: "road_node_id"}
+
     road_edges_gdf = _read_vector(cfg.data.roads, layer=col.road_edge_layer).to_crs(cfg.crs)
-    road_edges_gdf = _rename_to_canonical(road_edges_gdf, cfg)
+    road_edges_gdf = _rename_columns(road_edges_gdf, edge_renames)
 
     roads_path = Path(cfg.data.roads)
     if cfg.data.road_nodes:
         road_nodes_gdf = _read_vector(cfg.data.road_nodes).to_crs(cfg.crs)
-        road_nodes_gdf = _rename_to_canonical(road_nodes_gdf, cfg)
+        road_nodes_gdf = _rename_columns(road_nodes_gdf, node_renames)
     elif roads_path.suffix.lower() not in (".parquet", ".geoparquet") and col.road_node_layer:
         road_nodes_gdf = _read_vector(cfg.data.roads, layer=col.road_node_layer).to_crs(cfg.crs)
-        road_nodes_gdf = _rename_to_canonical(road_nodes_gdf, cfg)
+        road_nodes_gdf = _rename_columns(road_nodes_gdf, node_renames)
     else:
         logger.info("No road nodes file — deriving nodes from edge endpoints")
         road_edges_gdf, road_nodes_gdf = _derive_road_nodes(road_edges_gdf)
@@ -194,7 +196,27 @@ def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
     census_gdf["area"] = census_gdf.geometry.area / 1_000_000
     census_gdf.to_parquet(db_dir / "census_boundaries.parquet", index=False)
 
+    build_buildings_overlay(db_dir, cfg)
+
     logger.info("Parquet cache created successfully")
+
+
+def build_buildings_overlay(db_dir: Path, cfg: GreenPyConfig) -> None:
+    """Create census_buildings_overlay.parquet mapping each building to its census units.
+
+    Used by the Merge step as the `boundaries_buildings_overlay` view. Buildings
+    are reduced to representative points so each maps to exactly one unit.
+    """
+    logger.info("Building census/buildings overlay lookup")
+    buildings_gdf = gpd.read_parquet(db_dir / "buildings.parquet")
+    census_gdf = gpd.read_parquet(db_dir / "census_boundaries.parquet")
+    geo_levels = cfg.columns.geo_levels
+
+    points_gdf = buildings_gdf[["building_id", "geometry"]].copy()
+    points_gdf["geometry"] = points_gdf.representative_point()
+    overlay_gdf = gpd.sjoin(points_gdf, census_gdf[geo_levels + ["geometry"]], how="inner", predicate="within")
+    overlay_df = pd.DataFrame(overlay_gdf[["building_id"] + geo_levels]).drop_duplicates(subset="building_id")
+    overlay_df.to_parquet(db_dir / "census_buildings_overlay.parquet", index=False)
 
 
 def _filter_parks(parks_sites_gdf: gpd.GeoDataFrame, cfg: GreenPyConfig) -> gpd.GeoDataFrame:

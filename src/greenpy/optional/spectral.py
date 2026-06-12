@@ -14,6 +14,7 @@ from ..utils.constants import GEE_PROJECT_NAME
 
 
 def setup_gee(project: str | None = None) -> None:
+    """Authenticate and initialise Google Earth Engine (defaults to GEE_PROJECT_NAME from .env)."""
     project = project or GEE_PROJECT_NAME
     logger.debug(f"Initializing GEE for project: {project}")
     ee.Authenticate()
@@ -28,6 +29,7 @@ def get_imagery(
     cloud_coverage: float,
     spectral_indexes: list[str],
 ) -> "ee.Image":
+    """Build a cloud-filtered max-composite image of the requested spectral indices over the boundary."""
     logger.debug("Querying GEE for imagery")
     union_geom = geo_level_filt_fc.union().geometry()
     import eemont  # noqa: F401 — registers .spectralIndices() on ee.ImageCollection
@@ -48,6 +50,7 @@ def calculate_median_index(
     scale: float = 10.0,
     tile_scale: int = 4,
 ) -> "ee.FeatureCollection":
+    """Reduce the index image to the median value per feature geometry."""
     return imagery_ic.reduceRegions(
         collection=geometries,
         reducer=ee.Reducer.median(),
@@ -69,6 +72,12 @@ def process_geo_code(
     gee_boundaries_asset: str,
     overwrite: bool = True,
 ) -> pd.DataFrame | None:
+    """Compute median spectral indices per sub_geo_level unit within one geo_code via GEE.
+
+    Writes `Spectral_<geo_code>.csv` with columns <sub_geo_level> plus one
+    column per index in spectral_indexes. Returns the DataFrame, the cached
+    CSV when overwrite is False, or None on error.
+    """
     start_time = time.time()
     logger.info(f"Spectral: processing {geo_code}")
 
@@ -97,5 +106,6 @@ def process_geo_code(
         logger.info(f"Spectral: {geo_code} — {len(geo_spectral_df)} records in {end_time - start_time:.2f}s")
         return geo_spectral_df
 
-    except Exception as e:
-        logger.error(f"Spectral: error processing {geo_code}: {e}")
+    except Exception:
+        logger.exception(f"Spectral: error processing {geo_code}")
+        return None

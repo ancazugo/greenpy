@@ -7,6 +7,7 @@ from .constants import JAVA_HOME
 
 
 def get_spark() -> SparkSession:
+    """Create (or reuse) a local Sedona-enabled SparkSession with the project's JAR packages."""
     logger.debug("Setting up Apache Sedona")
 
     if JAVA_HOME:
@@ -20,7 +21,7 @@ def get_spark() -> SparkSession:
             "org.datasyslab:geotools-wrapper:1.7.1-28.5,"
             "net.postgis:postgis-jdbc:2021.1.0,"
             "net.postgis:postgis-geometry:2021.1.0,"
-            "org.postgresql:postgresql:42.5.4,",
+            "org.postgresql:postgresql:42.5.4",
         )
         .config(
             "spark.jars.repositories",

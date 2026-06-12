@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "apache-sedona[kepler-map,pydeck-map]==1.7.1",
     "earthengine-api>=1.7.12",
+    "eemont>=2025.7.1",
     "gdal==3.10.0",
     "geopandas>=1.1.2",
     "install-jdk>=1.1.0",
@@ -23,6 +24,7 @@ dependencies = [
     "scipy>=1.13.0",
     "tqdm>=4.67.3",
     "typer>=0.21.1",
+    "xee>=0.1.1",
 ]
 
 [project.scripts]

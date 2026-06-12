@@ -1,3 +1,4 @@
+import re
 import shutil
 import tempfile
 import pandas as pd
@@ -6,6 +7,39 @@ import geopandas as gpd
 from pathlib import Path
 from pyspark.sql.session import SparkSession
 from pyspark.sql.dataframe import DataFrame
+
+
+def view_suffix(geo_code: str) -> str:
+    """Sanitize a geo code into a valid Spark temp-view name suffix.
+
+    Per-geo views are suffixed with this so parallel workers processing
+    different geo codes never overwrite each other's views.
+    """
+    return re.sub(r"\W", "_", str(geo_code))
+
+
+def drop_geo_views(sedona: SparkSession, geo_code: str) -> None:
+    """Drop all per-geo temp views created while processing geo_code."""
+    sfx = view_suffix(geo_code)
+    for name in (
+        f"geo_boundary_{sfx}",
+        f"geo_sub_boundaries_{sfx}",
+        f"geo_buildings_{sfx}",
+        f"buildings_buffers_{sfx}",
+        f"geo_trees_{sfx}",
+    ):
+        sedona.catalog.dropTempView(name)
+
+
+def rename_tree_columns(gdf: gpd.GeoDataFrame, cfg) -> gpd.GeoDataFrame:
+    """Rename user-configured tree columns to canonical tree_height/tree_area/tree_id."""
+    col = cfg.columns
+    mapping = {
+        col.tree_height_col: "tree_height",
+        col.tree_area_col: "tree_area",
+        col.tree_id_col: "tree_id",
+    }
+    return gdf.rename(columns={k: v for k, v in mapping.items() if k in gdf.columns})
 
 
 def find_overlapping_files(boundary_gdf: gpd.GeoDataFrame, files_dir: Path, pattern: str = "*.gpkg") -> list[Path]:
@@ -69,28 +103,41 @@ def filter_buffer_geometries(
     buffer: int | None = None,
     id_col: str = "building_id",
 ) -> DataFrame:
+    """Filter table_name features intersecting the geo_code boundary, optionally buffered.
+
+    Requires the `geo_boundary_<geo_code>` view created by get_geometries() or
+    get_sub_geo_boundaries(). Registers `geo_<table_name>_<geo_code>` and, when a
+    buffer is given, `<table_name>_buffers_<geo_code>` (geometry buffered by
+    `buffer` metres plus id_col).
+    """
+    sfx = view_suffix(geo_code)
     geo_sdf = sedona.sql(
         f"""
-        SELECT b.* FROM {table_name} b, geo_boundary g
+        SELECT b.* FROM {table_name} b, geo_boundary_{sfx} g
         WHERE ST_Intersects(b.geometry, g.geometry)
         """
     )
-    geo_sdf.createOrReplaceTempView(f"geo_{table_name}")
+    geo_sdf.createOrReplaceTempView(f"geo_{table_name}_{sfx}")
 
     if buffer:
         geo_buffer_sdf = sedona.sql(
             f"""
             SELECT ST_Buffer(b.geometry, {buffer}) AS geometry, b.{id_col}
-            FROM geo_{table_name} b
+            FROM geo_{table_name}_{sfx} b
             """
         )
-        geo_buffer_sdf.createOrReplaceTempView(f"{table_name}_buffers")
+        geo_buffer_sdf.createOrReplaceTempView(f"{table_name}_buffers_{sfx}")
         return geo_buffer_sdf
 
     return geo_sdf
 
 
 def get_geometries(sedona: SparkSession, geo_level: str, geo_code: str, dissolve: bool = True) -> DataFrame:
+    """Select boundary rows where geo_level = geo_code, optionally dissolved to one geometry.
+
+    Registers the result as the `geo_boundary_<geo_code>` temp view used by
+    filter_buffer_geometries().
+    """
     query = "ST_Union_Aggr(geometry) AS geometry" if dissolve else "*"
     geo_boundary_sdf = sedona.sql(
         f"""
@@ -99,7 +146,7 @@ def get_geometries(sedona: SparkSession, geo_level: str, geo_code: str, dissolve
         WHERE {geo_level} = '{geo_code}'
         """
     )
-    geo_boundary_sdf.createOrReplaceTempView("geo_boundary")
+    geo_boundary_sdf.createOrReplaceTempView(f"geo_boundary_{view_suffix(geo_code)}")
     return geo_boundary_sdf
 
 
@@ -108,9 +155,10 @@ def get_sub_geo_boundaries(
 ) -> DataFrame:
     """Return one dissolved geometry per sub_geo_level unit within geo_level = geo_code.
 
-    Also refreshes the 'geo_boundary' temp view (whole-region dissolve) so that
-    filter_buffer_geometries() continues to work correctly.
+    Also refreshes the `geo_boundary_<geo_code>` temp view (whole-region
+    dissolve) so that filter_buffer_geometries() continues to work correctly.
     """
+    sfx = view_suffix(geo_code)
     sdf = sedona.sql(
         f"""
         SELECT {sub_geo_level}, ST_Union_Aggr(geometry) AS geometry
@@ -119,7 +167,7 @@ def get_sub_geo_boundaries(
         GROUP BY {sub_geo_level}
         """
     )
-    sdf.createOrReplaceTempView("geo_sub_boundaries")
+    sdf.createOrReplaceTempView(f"geo_sub_boundaries_{sfx}")
 
     sedona.sql(
         f"""
@@ -127,12 +175,13 @@ def get_sub_geo_boundaries(
         FROM boundaries
         WHERE {geo_level} = '{geo_code}'
         """
-    ).createOrReplaceTempView("geo_boundary")
+    ).createOrReplaceTempView(f"geo_boundary_{sfx}")
 
     return sdf
 
 
 def save_csv_as_parquet(in_directory: Path, path_pattern: str, out_path: Path) -> pd.DataFrame:
+    """Concatenate all CSVs matching path_pattern into a single parquet file."""
     csv_files = list(in_directory.glob(path_pattern))
     dataframes_lst = [pd.read_csv(file) for file in csv_files]
     concatenated_df = pd.concat(dataframes_lst, ignore_index=True)
