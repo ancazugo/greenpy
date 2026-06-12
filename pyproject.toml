@@ -10,6 +10,7 @@ dependencies = [
     "eemont>=2025.7.1",
     "gdal==3.10.0",
     "geopandas>=1.1.2",
+    "h3>=4.5.0",
     "install-jdk>=1.1.0",
     "ipykernel>=7.1.0",
     "loguru>=0.7.3",

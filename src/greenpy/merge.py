@@ -13,7 +13,7 @@ from pyspark.sql.dataframe import DataFrame
 from pyspark.sql.session import SparkSession
 
 from .config.schema import GreenPyConfig
-from .pipeline import build_buildings_overlay
+from .pipeline import build_buildings_overlay, ensure_h3_files
 from .utils.data_processing import save_temp_file
 
 
@@ -44,12 +44,13 @@ def merge_output_csv(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: li
         save_temp_file(sdf, db_dir / f"{name}.parquet", coalesce=1, file_format=file_format)
 
 
-def read_parquet_files(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: list[int]) -> dict:
+def read_parquet_files(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: list[int], h3_resolution: int | None = None) -> dict:
     """Register available consolidated parquet files as Spark temp views.
 
     Returns a dict with a boolean per optional table ('spectral') and raises
     if a required module output is missing. Rebuilds the buildings overlay
-    lookup if the parquet cache predates it.
+    lookup if the parquet cache predates it. When h3_resolution is given, the
+    boundaries and overlay views use the H3 hexagon grid.
     """
     db_dir = Path(cfg.output.base_dir) / "database"
 
@@ -81,11 +82,16 @@ def read_parquet_files(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: 
         logger.warning("No Spectral output found — merged table will omit spectral indices")
 
     sedona.read.format("geoparquet").load(str(db_dir / "buildings.parquet")).createOrReplaceTempView("buildings")
-    sedona.read.format("geoparquet").load(str(db_dir / "census_boundaries.parquet")).createOrReplaceTempView("boundaries")
 
-    overlay_parquet = db_dir / "census_buildings_overlay.parquet"
-    if not overlay_parquet.exists():
-        build_buildings_overlay(db_dir, cfg)
+    if h3_resolution is not None:
+        boundaries_parquet, overlay_parquet = ensure_h3_files(sedona, db_dir, cfg, h3_resolution)
+    else:
+        boundaries_parquet = db_dir / "census_boundaries.parquet"
+        overlay_parquet = db_dir / "census_buildings_overlay.parquet"
+        if not overlay_parquet.exists():
+            build_buildings_overlay(db_dir, cfg)
+
+    sedona.read.format("geoparquet").load(str(boundaries_parquet)).createOrReplaceTempView("boundaries")
     sedona.read.format("parquet").load(str(overlay_parquet)).createOrReplaceTempView("boundaries_buildings_overlay")
 
     return {"has_spectral": has_spectral}
@@ -198,10 +204,14 @@ def merge_t3_and_t300(sedona: SparkSession, t3_buffer_lst: list[int]) -> DataFra
 
 def aggregate_t3_300_by_boundaries(sedona: SparkSession, geo_level: str, t3_buffer_lst: list[int]) -> DataFrame:
     """Average per-building T3/T300 metrics up to geo_level via the buildings overlay."""
-    t3_300_boundaries = sedona.sql(f"""
-    SELECT DISTINCT bbo.{geo_level}, t3_300.* FROM t3_300
-    LEFT JOIN boundaries_buildings_overlay bbo ON t3_300.building_id = bbo.building_id
-    """)
+    if geo_level in sedona.table("t3_300").columns:
+        # geo_level == sub_geo_level (e.g. H3 cells): already attached per building
+        t3_300_boundaries = sedona.table("t3_300")
+    else:
+        t3_300_boundaries = sedona.sql(f"""
+        SELECT DISTINCT bbo.{geo_level}, t3_300.* FROM t3_300
+        LEFT JOIN boundaries_buildings_overlay bbo ON t3_300.building_id = bbo.building_id
+        """)
     t3_300_boundaries.createOrReplaceTempView("t3_300_boundaries")
 
     avg_tree_cols = ", ".join([f"ROUND(AVG(tree_count_{b}m), 2) as tree_count_{b}m" for b in t3_buffer_lst])
@@ -240,6 +250,7 @@ def process_data(
     geo_level: str,
     sub_geo_level: str,
     t3_buffer_lst: list[int] = None,
+    h3_resolution: int | None = None,
 ) -> pd.DataFrame:
     """Run the full merge pipeline and write database/T3_30_300_spectral.parquet.
 
@@ -252,7 +263,7 @@ def process_data(
 
     logger.info("Starting merge pipeline")
 
-    tables = read_parquet_files(sedona, cfg, t3_buffer_lst)
+    tables = read_parquet_files(sedona, cfg, t3_buffer_lst, h3_resolution=h3_resolution)
     aggregate_t30(sedona, geo_level, sub_geo_level)
     aggregate_tree_count(sedona, geo_level, sub_geo_level)
     merge_t30_and_spectral(sedona, geo_level, sub_geo_level, tables["has_spectral"])

@@ -9,7 +9,8 @@ import geopandas as gpd
 from loguru import logger
 from pyspark.sql.session import SparkSession
 
-from .config.schema import GreenPyConfig
+from .config.schema import GreenPyConfig, is_osm
+from .utils.h3_boundaries import build_h3_boundaries, build_h3_buildings_overlay, h3_column
 
 
 def _read_vector(path: str, layer: str | None = None) -> gpd.GeoDataFrame:
@@ -91,10 +92,14 @@ def _coerce_null_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return gdf
 
 
-def load_tables(sedona: SparkSession, cfg: GreenPyConfig) -> dict:
+def load_tables(sedona: SparkSession, cfg: GreenPyConfig, h3_resolution: int | None = None) -> dict:
     """
     Load all datasets from paths in cfg, rename columns to canonical names,
     register Spark temp views, and return a dict of named GeoDataFrames.
+
+    When h3_resolution is given, the `boundaries` view (and the buildings
+    overlay) contains H3 hexagons tagged with parent census codes instead of
+    the census units themselves.
     """
     logger.debug("Loading tables from config paths")
 
@@ -112,6 +117,9 @@ def load_tables(sedona: SparkSession, cfg: GreenPyConfig) -> dict:
 
     if not buildings_parquet.exists():
         _setup_parquet_files(cfg, db_dir)
+
+    if h3_resolution is not None:
+        census_parquet, buildings_overlay_parquet = ensure_h3_files(sedona, db_dir, cfg, h3_resolution)
 
     buildings_gdf = gpd.read_parquet(buildings_parquet)
     parks_sites_gdf = gpd.read_parquet(parks_sites_parquet)
@@ -150,73 +158,129 @@ def load_tables(sedona: SparkSession, cfg: GreenPyConfig) -> dict:
 
 
 def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
-    """Convert raw input files to parquet, applying canonical column renames."""
+    """Convert raw inputs to parquet, applying canonical column renames.
+
+    Layers whose data path is "osm" are fetched from OpenStreetMap inside the
+    census-boundary extent instead of read from file. The census boundaries are
+    loaded first because they define the OSM query area.
+    """
     logger.info("Setting up parquet cache from raw input files")
     col = cfg.columns
-
-    buildings_gdf = _read_vector(cfg.data.buildings, layer=col.building_layer).to_crs(cfg.crs)
-    buildings_gdf = _rename_columns(buildings_gdf, {col.building_id: "building_id"})
-    buildings_gdf.to_parquet(db_dir / "buildings.parquet", index=False)
-
-    parks_sites_gdf = _read_vector(cfg.data.parks_sites).to_crs(cfg.crs)
-    parks_sites_gdf = parks_sites_gdf.rename(columns={col.park_id: "park_id"})
-    parks_sites_gdf.to_parquet(db_dir / "parks_sites.parquet", index=False)
-
-    parks_access_gdf = _read_vector(cfg.data.parks_access).to_crs(cfg.crs)
-    parks_access_gdf = parks_access_gdf.rename(columns={col.park_id: "park_id"})
-    if col.park_access_ref_col and col.park_access_ref_col in parks_access_gdf.columns:
-        parks_access_gdf = parks_access_gdf.rename(columns={col.park_access_ref_col: "park_access_ref"})
-    parks_access_gdf.to_parquet(db_dir / "parks_access.parquet", index=False)
-
-    edge_renames = {
-        col.road_edge_start: "road_edge_start",
-        col.road_edge_end: "road_edge_end",
-        col.road_edge_length: "road_edge_length",
-    }
-    node_renames = {col.road_node_id: "road_node_id"}
-
-    road_edges_gdf = _read_vector(cfg.data.roads, layer=col.road_edge_layer).to_crs(cfg.crs)
-    road_edges_gdf = _rename_columns(road_edges_gdf, edge_renames)
-
-    roads_path = Path(cfg.data.roads)
-    if cfg.data.road_nodes:
-        road_nodes_gdf = _read_vector(cfg.data.road_nodes).to_crs(cfg.crs)
-        road_nodes_gdf = _rename_columns(road_nodes_gdf, node_renames)
-    elif roads_path.suffix.lower() not in (".parquet", ".geoparquet") and col.road_node_layer:
-        road_nodes_gdf = _read_vector(cfg.data.roads, layer=col.road_node_layer).to_crs(cfg.crs)
-        road_nodes_gdf = _rename_columns(road_nodes_gdf, node_renames)
-    else:
-        logger.info("No road nodes file — deriving nodes from edge endpoints")
-        road_edges_gdf, road_nodes_gdf = _derive_road_nodes(road_edges_gdf)
-
-    road_edges_gdf.to_parquet(db_dir / "road_edges.parquet", index=False)
-    road_nodes_gdf.to_parquet(db_dir / "road_nodes.parquet", index=False)
 
     census_gdf = _read_vector(cfg.data.census_boundaries).to_crs(cfg.crs)
     census_gdf["area"] = census_gdf.geometry.area / 1_000_000
     census_gdf.to_parquet(db_dir / "census_boundaries.parquet", index=False)
+
+    osm_layers = [s for s in ("buildings", "parks_sites", "parks_access", "roads") if is_osm(getattr(cfg.data, s))]
+    if osm_layers:
+        from . import osm
+        logger.info(f"Layers sourced from OSM: {osm_layers} (fetched once, then cached as parquet)")
+        # buffered so the road network can route to parks just outside the study area
+        query_polygon = osm.build_query_polygon(census_gdf, cfg.osm.fetch_buffer)
+
+    if is_osm(cfg.data.buildings):
+        buildings_gdf = osm.fetch_osm_buildings(osm.build_query_polygon(census_gdf), cfg.osm.building_types, cfg.crs)
+    else:
+        buildings_gdf = _read_vector(cfg.data.buildings, layer=col.building_layer).to_crs(cfg.crs)
+        buildings_gdf = _rename_columns(buildings_gdf, {col.building_id: "building_id"})
+    buildings_gdf.to_parquet(db_dir / "buildings.parquet", index=False)
+
+    if is_osm(cfg.data.parks_sites):
+        parks_sites_gdf = osm.fetch_osm_parks(query_polygon, cfg.osm.park_tags, cfg.osm.exclude_private, cfg.crs)
+    else:
+        parks_sites_gdf = _read_vector(cfg.data.parks_sites).to_crs(cfg.crs)
+        parks_sites_gdf = parks_sites_gdf.rename(columns={col.park_id: "park_id"})
+    parks_sites_gdf.to_parquet(db_dir / "parks_sites.parquet", index=False)
+
+    if is_osm(cfg.data.roads):
+        road_edges_gdf, road_nodes_gdf = osm.fetch_osm_roads(query_polygon, cfg.osm.network_type, cfg.crs)
+    else:
+        edge_renames = {
+            col.road_edge_start: "road_edge_start",
+            col.road_edge_end: "road_edge_end",
+            col.road_edge_length: "road_edge_length",
+        }
+        node_renames = {col.road_node_id: "road_node_id"}
+
+        road_edges_gdf = _read_vector(cfg.data.roads, layer=col.road_edge_layer).to_crs(cfg.crs)
+        road_edges_gdf = _rename_columns(road_edges_gdf, edge_renames)
+
+        roads_path = Path(cfg.data.roads)
+        if cfg.data.road_nodes:
+            road_nodes_gdf = _read_vector(cfg.data.road_nodes).to_crs(cfg.crs)
+            road_nodes_gdf = _rename_columns(road_nodes_gdf, node_renames)
+        elif roads_path.suffix.lower() not in (".parquet", ".geoparquet") and col.road_node_layer:
+            road_nodes_gdf = _read_vector(cfg.data.roads, layer=col.road_node_layer).to_crs(cfg.crs)
+            road_nodes_gdf = _rename_columns(road_nodes_gdf, node_renames)
+        else:
+            logger.info("No road nodes file — deriving nodes from edge endpoints")
+            road_edges_gdf, road_nodes_gdf = _derive_road_nodes(road_edges_gdf)
+
+    road_edges_gdf.to_parquet(db_dir / "road_edges.parquet", index=False)
+    road_nodes_gdf.to_parquet(db_dir / "road_nodes.parquet", index=False)
+
+    # Access points last: OSM derivation needs the parks and roads from above
+    if is_osm(cfg.data.parks_access):
+        parks_access_gdf = osm.derive_park_access_points(parks_sites_gdf, road_edges_gdf, query_polygon, cfg.crs)
+    else:
+        parks_access_gdf = _read_vector(cfg.data.parks_access).to_crs(cfg.crs)
+        parks_access_gdf = parks_access_gdf.rename(columns={col.park_id: "park_id"})
+        if col.park_access_ref_col and col.park_access_ref_col in parks_access_gdf.columns:
+            parks_access_gdf = parks_access_gdf.rename(columns={col.park_access_ref_col: "park_access_ref"})
+    parks_access_gdf.to_parquet(db_dir / "parks_access.parquet", index=False)
 
     build_buildings_overlay(db_dir, cfg)
 
     logger.info("Parquet cache created successfully")
 
 
-def build_buildings_overlay(db_dir: Path, cfg: GreenPyConfig) -> None:
-    """Create census_buildings_overlay.parquet mapping each building to its census units.
+def _build_overlay(buildings_gdf: gpd.GeoDataFrame, boundaries_gdf: gpd.GeoDataFrame, code_cols: list[str], out_path: Path) -> None:
+    """Write a building_id → boundary-codes lookup parquet.
 
     Used by the Merge step as the `boundaries_buildings_overlay` view. Buildings
     are reduced to representative points so each maps to exactly one unit.
     """
+    points_gdf = buildings_gdf[["building_id", "geometry"]].copy()
+    points_gdf["geometry"] = points_gdf.representative_point()
+    overlay_gdf = gpd.sjoin(points_gdf, boundaries_gdf[code_cols + ["geometry"]], how="inner", predicate="within")
+    overlay_df = pd.DataFrame(overlay_gdf[["building_id"] + code_cols]).drop_duplicates(subset="building_id")
+    overlay_df.to_parquet(out_path, index=False)
+
+
+def build_buildings_overlay(db_dir: Path, cfg: GreenPyConfig) -> None:
+    """Create census_buildings_overlay.parquet mapping each building to its census units."""
     logger.info("Building census/buildings overlay lookup")
     buildings_gdf = gpd.read_parquet(db_dir / "buildings.parquet")
     census_gdf = gpd.read_parquet(db_dir / "census_boundaries.parquet")
-    geo_levels = cfg.columns.geo_levels
+    _build_overlay(buildings_gdf, census_gdf, cfg.columns.geo_levels, db_dir / "census_buildings_overlay.parquet")
 
-    points_gdf = buildings_gdf[["building_id", "geometry"]].copy()
-    points_gdf["geometry"] = points_gdf.representative_point()
-    overlay_gdf = gpd.sjoin(points_gdf, census_gdf[geo_levels + ["geometry"]], how="inner", predicate="within")
-    overlay_df = pd.DataFrame(overlay_gdf[["building_id"] + geo_levels]).drop_duplicates(subset="building_id")
-    overlay_df.to_parquet(db_dir / "census_buildings_overlay.parquet", index=False)
+
+def ensure_h3_files(sedona: SparkSession, db_dir: Path, cfg: GreenPyConfig, resolution: int) -> tuple[Path, Path]:
+    """Build (if missing) and return the H3 boundaries and buildings-overlay parquets.
+
+    Both are computed with Sedona's native H3 and spatial-join support. Files
+    are resolution-suffixed so multiple resolutions can coexist in the same
+    database directory.
+    """
+    h3_parquet = db_dir / f"h3_boundaries_res{resolution}.parquet"
+    h3_overlay_parquet = db_dir / f"h3_buildings_overlay_res{resolution}.parquet"
+
+    if not h3_parquet.exists():
+        sedona.read.format("geoparquet").load(str(db_dir / "census_boundaries.parquet")) \
+            .createOrReplaceTempView("h3_census_src")
+        h3_gdf = build_h3_boundaries(sedona, "h3_census_src", resolution, cfg.columns.geo_levels, cfg.crs)
+        h3_gdf.to_parquet(h3_parquet, index=False)
+
+    if not h3_overlay_parquet.exists():
+        logger.info("Building H3/buildings overlay lookup")
+        sedona.read.format("geoparquet").load(str(h3_parquet)).createOrReplaceTempView("h3_grid_src")
+        sedona.read.format("geoparquet").load(str(db_dir / "buildings.parquet")) \
+            .createOrReplaceTempView("h3_buildings_src")
+        code_cols = cfg.columns.geo_levels + [h3_column(resolution)]
+        overlay_df = build_h3_buildings_overlay(sedona, "h3_buildings_src", "h3_grid_src", code_cols)
+        overlay_df.to_parquet(h3_overlay_parquet, index=False)
+
+    return h3_parquet, h3_overlay_parquet
 
 
 def _filter_parks(parks_sites_gdf: gpd.GeoDataFrame, cfg: GreenPyConfig) -> gpd.GeoDataFrame:

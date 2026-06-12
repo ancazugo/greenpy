@@ -14,6 +14,7 @@ from tqdm import tqdm
 
 from .config.loader import load_config
 from .pipeline import load_tables, setup_output_dirs
+from .utils.h3_boundaries import h3_column
 from .utils.logging_config import setup_logger
 from .utils.sedona_config import get_spark
 from . import t3 as t3_module
@@ -51,6 +52,7 @@ def run(
     process: str = typer.Option(..., "--process", "-p", help="Module to run: T3, T30, T300, Tree_count, Spectral, Merge"),
     geo_level: str = typer.Option(None, "--geo_level", help="Geography column to process (must be in config.columns.geo_levels)"),
     sub_geo_level: str = typer.Option(None, "--sub_geo_level", help="Sub-geography column (for Tree_count and Merge)"),
+    h3_resolution: Optional[int] = typer.Option(None, "--h3_resolution", help="Aggregate to H3 hexagons at this resolution (0-15) instead of the finest census level; overrides config"),
     geo_code: Optional[str] = typer.Option(None, "--geo_code", help="Single geography code to process; omit to process all"),
     query_method: str = typer.Option("rdd", "--query_method", help="Sedona query method: sql or rdd"),
     buffer: int = typer.Option(100, "--buffer", help="Tree count buffer radius in metres (T3)"),
@@ -91,6 +93,25 @@ def run(
         typer.echo(f"Error: --geo_level '{geo_level}' not in config.columns.geo_levels: {geo_levels}", err=True)
         raise typer.Exit(1)
 
+    h3_from_cli = h3_resolution is not None
+    if h3_resolution is None:
+        h3_resolution = cfg.h3_resolution
+    if h3_resolution is not None and process == "Spectral":
+        # Spectral aggregates server-side on a GEE boundaries asset, so hexagons don't apply
+        if h3_from_cli:
+            typer.echo("Error: Spectral uses a GEE boundaries asset and does not support --h3_resolution", err=True)
+            raise typer.Exit(1)
+        logger.warning("Spectral does not support H3 aggregation — ignoring h3_resolution from config")
+        h3_resolution = None
+    if h3_resolution is not None:
+        if not 0 <= h3_resolution <= 15:
+            typer.echo(f"Error: --h3_resolution must be between 0 and 15, got {h3_resolution}", err=True)
+            raise typer.Exit(1)
+        if sub_geo_level:
+            typer.echo("Error: --sub_geo_level cannot be combined with --h3_resolution (hexagons replace the sub-geography)", err=True)
+            raise typer.Exit(1)
+        sub_geo_level = h3_column(h3_resolution)
+
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
     setup_logger(log_dir / f"{process}_processing.log", log_level)
@@ -99,7 +120,12 @@ def run(
         from .merge import merge_output_csv, process_data
         sedona = get_spark()
         merge_output_csv(sedona, cfg, t3_buffers)
-        process_data(sedona, cfg, geo_level or (geo_levels[-2] if len(geo_levels) > 1 else geo_levels[0]), sub_geo_level or geo_levels[-1], t3_buffers)
+        if h3_resolution is not None:
+            # one output row per hexagon unless the user aggregates up to a census level
+            merge_geo_level = geo_level or sub_geo_level
+        else:
+            merge_geo_level = geo_level or (geo_levels[-2] if len(geo_levels) > 1 else geo_levels[0])
+        process_data(sedona, cfg, merge_geo_level, sub_geo_level or geo_levels[-1], t3_buffers, h3_resolution=h3_resolution)
         return
 
     if process == "Spectral":
@@ -124,7 +150,7 @@ def run(
         return
 
     sedona = get_spark()
-    tables = load_tables(sedona, cfg)
+    tables = load_tables(sedona, cfg, h3_resolution=h3_resolution)
     dirs = tables["output_dirs"]
 
     output_dir_map = {"T3": dirs["t3"], "T30": dirs["t30"], "T300": dirs["t300"], "Tree_count": dirs["tree_count"]}

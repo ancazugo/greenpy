@@ -1,10 +1,15 @@
 from dataclasses import dataclass, field
 
 
+def is_osm(source: str | None) -> bool:
+    """True when a config data path requests the OSM source instead of a file."""
+    return isinstance(source, str) and source.strip().lower() == "osm"
+
+
 @dataclass
 class ColumnMapping:
-    # Buildings
-    building_id: str
+    # Buildings (building_id only required when buildings come from a file)
+    building_id: str | None = None
     building_layer: str | None = None
 
     # Roads
@@ -47,6 +52,23 @@ class DataPaths:
 
 
 @dataclass
+class OSMConfig:
+    """Options for layers sourced from OSM (data paths set to "osm")."""
+
+    # osmnx network type for roads (walkable by default)
+    network_type: str = "walk"
+    # building=* tag values to fetch; None = residential defaults, ["all"] = every building
+    building_types: list[str] | None = None
+    # OSM tags for parks, e.g. {leisure: [park], landuse: [village_green]}; None = public-park defaults
+    park_tags: dict[str, list[str]] | None = None
+    # Drop parks tagged access=private/no/customers
+    exclude_private: bool = True
+    # Buffer (m) around the census boundary when fetching roads/parks/access,
+    # so the network can route to parks just outside the study area
+    fetch_buffer: int = 2000
+
+
+@dataclass
 class OutputPaths:
     base_dir: str
 
@@ -66,4 +88,8 @@ class GreenPyConfig:
     output: OutputPaths
     gee_project: str | None = None
     gee_boundaries_asset: str | None = None
+    # Aggregate to H3 hexagons at this resolution instead of the finest geo level
+    h3_resolution: int | None = None
     tile_system: TileSystemConfig = field(default_factory=TileSystemConfig)
+    # Options for layers with their data path set to "osm"
+    osm: OSMConfig = field(default_factory=OSMConfig)
