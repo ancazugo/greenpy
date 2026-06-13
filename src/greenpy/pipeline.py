@@ -42,6 +42,7 @@ def setup_output_dirs(cfg: GreenPyConfig) -> dict[str, Path]:
         "t300": base / "T300",
         "spectral": base / "Spectral",
         "tree_count": base / "Tree_count",
+        "visibility": base / "Visibility",
         "database": base / "database",
     }
     for d in dirs.values():
@@ -182,7 +183,12 @@ def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
         buildings_gdf = osm.fetch_osm_buildings(osm.build_query_polygon(census_gdf), cfg.osm.building_types, cfg.crs)
     else:
         buildings_gdf = _read_vector(cfg.data.buildings, layer=col.building_layer).to_crs(cfg.crs)
-        buildings_gdf = _rename_columns(buildings_gdf, {col.building_id: "building_id"})
+        buildings_gdf = _rename_columns(
+            buildings_gdf, {col.building_id: "building_id", col.building_height_col: "building_height"}
+        )
+        if "building_height" in buildings_gdf.columns:
+            # non-numeric values become NaN and are skipped by the Visibility module
+            buildings_gdf["building_height"] = pd.to_numeric(buildings_gdf["building_height"], errors="coerce")
     buildings_gdf.to_parquet(db_dir / "buildings.parquet", index=False)
 
     if is_osm(cfg.data.parks_sites):

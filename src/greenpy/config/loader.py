@@ -60,6 +60,7 @@ def load_config(path: str | Path) -> GreenPyConfig:
         columns=ColumnMapping(
             building_id=columns_raw.get("building_id"),
             building_layer=columns_raw.get("building_layer"),
+            building_height_col=columns_raw.get("building_height_col"),
             road_node_id=columns_raw.get("road_node_id", "id"),
             road_edge_start=columns_raw.get("road_edge_start", "start_node"),
             road_edge_end=columns_raw.get("road_edge_end", "end_node"),

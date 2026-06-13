@@ -12,8 +12,7 @@ from .config.schema import GreenPyConfig
 from .utils.data_processing import (
     filter_buffer_geometries,
     get_geometries,
-    find_overlapping_files,
-    rename_tree_columns,
+    load_trees_gdf,
     view_suffix,
     drop_geo_views,
 )
@@ -40,25 +39,7 @@ def read_trees_unique(
     """
     logger.debug(f"Reading tree vector files for {geo_code}")
 
-    if tree_paths is not None:
-        parts = [gpd.read_file(p) for p in tree_paths]
-        geo_trees_gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True))
-    elif trees_dir.is_file():
-        suffix = trees_dir.suffix.lower()
-        geo_trees_gdf = gpd.read_parquet(trees_dir) if suffix in (".parquet", ".geoparquet") else gpd.read_file(trees_dir)
-    elif cfg.tile_system.enabled:
-        paths = list(trees_dir.glob("*.gpkg"))
-        logger.debug(f"Found {len(paths)} tree tile files")
-        parts = [gpd.read_file(p) for p in paths]
-        geo_trees_gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True))
-    else:
-        paths = find_overlapping_files(geo_boundary_gdf, trees_dir, pattern="*.gpkg")
-        logger.debug(f"Found {len(paths)} tree vector files")
-        parts = [gpd.read_file(p) for p in paths]
-        geo_trees_gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True))
-
-    geo_trees_gdf = rename_tree_columns(geo_trees_gdf, cfg)
-    geo_trees_gdf = geo_trees_gdf.to_crs(cfg.crs) if geo_trees_gdf.crs is not None else geo_trees_gdf.set_crs(cfg.crs)
+    geo_trees_gdf = load_trees_gdf(trees_dir, geo_boundary_gdf, cfg, tree_paths=tree_paths)
 
     geo_trees_sdf = sedona.createDataFrame(geo_trees_gdf)
     if "geom" in geo_trees_sdf.columns:

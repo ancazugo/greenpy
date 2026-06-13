@@ -11,6 +11,8 @@ class ColumnMapping:
     # Buildings (building_id only required when buildings come from a file)
     building_id: str | None = None
     building_layer: str | None = None
+    # Building height in metres — required only by the Visibility module
+    building_height_col: str | None = None
 
     # Roads
     road_node_id: str = "id"

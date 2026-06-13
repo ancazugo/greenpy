@@ -36,7 +36,7 @@ def merge_output_csv(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: li
         t3_sdf = sedona.read.format("csv").option("header", True).option("inferSchema", True).load(str(base / "T3") + f"/*{buffer}m.csv")
         save_temp_file(t3_sdf, t3_parquet, coalesce=1, file_format=file_format)
 
-    for name in ["T30", "T300", "Spectral", "Tree_count"]:
+    for name in ["T30", "T300", "Spectral", "Tree_count", "Visibility"]:
         if not list((base / name).glob("*.csv")):
             logger.warning(f"No {name} CSV outputs found — skipping")
             continue

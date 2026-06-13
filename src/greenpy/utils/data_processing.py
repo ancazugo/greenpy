@@ -27,6 +27,11 @@ def drop_geo_views(sedona: SparkSession, geo_code: str) -> None:
         f"geo_buildings_{sfx}",
         f"buildings_buffers_{sfx}",
         f"geo_trees_{sfx}",
+        f"vis_buildings_{sfx}",
+        f"vis_observers_{sfx}",
+        f"vis_trees_{sfx}",
+        f"vis_obstacles_{sfx}",
+        f"vis_pairs_{sfx}",
     ):
         sedona.catalog.dropTempView(name)
 
@@ -40,6 +45,39 @@ def rename_tree_columns(gdf: gpd.GeoDataFrame, cfg) -> gpd.GeoDataFrame:
         col.tree_id_col: "tree_id",
     }
     return gdf.rename(columns={k: v for k, v in mapping.items() if k in gdf.columns})
+
+
+def load_trees_gdf(
+    trees_dir: Path,
+    geo_boundary_gdf: gpd.GeoDataFrame,
+    cfg,
+    tree_paths: list[Path] | None = None,
+) -> gpd.GeoDataFrame:
+    """Read tree vector files for a boundary into one GeoDataFrame in cfg.crs.
+
+    Reads either a single tree file, an explicit list of tile paths, or the
+    files in trees_dir overlapping the boundary. Columns are renamed to the
+    canonical tree_height/tree_area/tree_id names; original geometries are kept.
+    """
+    if tree_paths is not None:
+        parts = [gpd.read_file(p) for p in tree_paths]
+        trees_gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True))
+    elif trees_dir.is_file():
+        suffix = trees_dir.suffix.lower()
+        trees_gdf = gpd.read_parquet(trees_dir) if suffix in (".parquet", ".geoparquet") else gpd.read_file(trees_dir)
+    elif cfg.tile_system.enabled:
+        paths = list(trees_dir.glob("*.gpkg"))
+        logger.debug(f"Found {len(paths)} tree tile files")
+        parts = [gpd.read_file(p) for p in paths]
+        trees_gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True))
+    else:
+        paths = find_overlapping_files(geo_boundary_gdf, trees_dir, pattern="*.gpkg")
+        logger.debug(f"Found {len(paths)} tree vector files")
+        parts = [gpd.read_file(p) for p in paths]
+        trees_gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True))
+
+    trees_gdf = rename_tree_columns(trees_gdf, cfg)
+    return trees_gdf.to_crs(cfg.crs) if trees_gdf.crs is not None else trees_gdf.set_crs(cfg.crs)
 
 
 def find_overlapping_files(boundary_gdf: gpd.GeoDataFrame, files_dir: Path, pattern: str = "*.gpkg") -> list[Path]:
