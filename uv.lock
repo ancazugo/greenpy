@@ -924,11 +924,8 @@ dependencies = [
     { name = "apache-sedona", extra = ["kepler-map", "pydeck-map"] },
     { name = "earthengine-api" },
     { name = "eemont" },
-    { name = "gdal" },
     { name = "geopandas" },
     { name = "h3" },
-    { name = "install-jdk" },
-    { name = "ipykernel" },
     { name = "loguru" },
     { name = "osmnx" },
     { name = "overturemaps" },
@@ -945,16 +942,20 @@ dependencies = [
     { name = "xee" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "gdal" },
+    { name = "install-jdk" },
+    { name = "ipykernel" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "apache-sedona", extras = ["kepler-map", "pydeck-map"], specifier = "==1.9.0" },
     { name = "earthengine-api", specifier = ">=1.7.12" },
     { name = "eemont", specifier = ">=2025.7.1" },
-    { name = "gdal", specifier = "==3.10.0" },
     { name = "geopandas", specifier = ">=1.1.2" },
     { name = "h3", specifier = ">=4.5.0" },
-    { name = "install-jdk", specifier = ">=1.1.0" },
-    { name = "ipykernel", specifier = ">=7.1.0" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "osmnx", specifier = ">=2.0.7" },
     { name = "overturemaps", specifier = ">=1.0.1" },
@@ -969,6 +970,13 @@ requires-dist = [
     { name = "tqdm", specifier = ">=4.67.3" },
     { name = "typer", specifier = ">=0.21.1" },
     { name = "xee", specifier = ">=0.1.1" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "gdal", specifier = "==3.10.0" },
+    { name = "install-jdk", specifier = ">=1.1.0" },
+    { name = "ipykernel", specifier = ">=7.1.0" },
 ]
 
 [[package]]
