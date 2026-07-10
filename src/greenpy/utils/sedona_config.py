@@ -17,8 +17,8 @@ def get_spark() -> SparkSession:
         SedonaContext.builder()
         .config(
             "spark.jars.packages",
-            "org.apache.sedona:sedona-spark-3.5_2.12:1.7.1,"
-            "org.datasyslab:geotools-wrapper:1.7.1-28.5,"
+            "org.apache.sedona:sedona-spark-shaded-3.5_2.12:1.9.0,"
+            "org.datasyslab:geotools-wrapper:1.9.0-33.5,"
             "net.postgis:postgis-jdbc:2021.1.0,"
             "net.postgis:postgis-geometry:2021.1.0,"
             "org.postgresql:postgresql:42.5.4",

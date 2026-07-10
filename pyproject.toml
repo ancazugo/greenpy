@@ -5,7 +5,7 @@ description = "Measure the 3-30-300 rule of urban greening using Apache Sedona"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "apache-sedona[kepler-map,pydeck-map]==1.7.1",
+    "apache-sedona[kepler-map,pydeck-map]==1.9.0",
     "earthengine-api>=1.7.12",
     "eemont>=2025.7.1",
     "gdal==3.10.0",
