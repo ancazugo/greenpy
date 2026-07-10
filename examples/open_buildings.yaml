@@ -1,0 +1,41 @@
+# Config sourcing buildings from Google Open Buildings v3 (via Google Earth
+# Engine) and the other layers from OpenStreetMap. Requires gee_project (or
+# GEE_PROJECT_NAME in .env) and a prior `earthengine authenticate`.
+#
+# Coverage caveats — greenpy warns about both at cache-build time:
+#   - Open Buildings covers Africa, South and Southeast Asia, and Latin America
+#     & the Caribbean only. It has NO footprints in Europe or North America.
+#   - Footprints carry no height, so the optional Visibility module is not
+#     available with buildings: open_buildings.
+
+study_area_name: Nairobi
+
+# Projected CRS in metres appropriate for your area (UTM 37S for Nairobi)
+crs: EPSG:32737
+
+data:
+  buildings: open_buildings
+  parks_sites: osm
+  parks_access: osm
+  roads: osm
+  census_boundaries: /path/to/census_tracts.gpkg
+
+  # Trees/canopy still come from your own data (or GEE) — see generic.yaml
+  trees_dir: /path/to/trees/
+
+# Needed to initialise Google Earth Engine
+gee_project: my-gee-project
+
+# Optional — this is the default
+open_buildings:
+  # Min detection confidence to keep (dataset values roughly in [0.5, 1))
+  confidence_threshold: 0.7
+
+columns:
+  # No building_id needed — Open Buildings footprints use the plus code as id.
+  geo_levels:
+    - district_code
+    - tract_code
+
+output:
+  base_dir: /path/to/output/

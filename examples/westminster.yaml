@@ -1,0 +1,49 @@
+study_area_name: Westminster
+crs: EPSG:27700
+
+data:
+  buildings: /maps/acz25/phd-thesis-data/output/greenpy/Westminster/input/E09000033_buildings.parquet
+  trees_dir: /maps/acz25/phd-thesis-data/output/greenpy/Westminster/input/E09000033_trees.parquet
+  parks_sites: /maps/acz25/phd-thesis-data/output/greenpy/Westminster/input/E09000033_public_park_sites.parquet
+  parks_access: /maps/acz25/phd-thesis-data/output/greenpy/Westminster/input/E09000033_public_park_accesses.parquet
+  roads: /maps/acz25/phd-thesis-data/output/greenpy/Westminster/input/E09000033_road_edges.parquet
+  census_boundaries: /maps/acz25/phd-thesis-data/output/greenpy/Westminster/input/E09000033_boundaries.parquet
+  # chm_tiles_dir: /maps/acz25/phd-thesis-data/output/greenpy/Westminster/input/
+
+columns:
+  building_id: verisk_premise_id
+  building_layer: edition_17_0_new_format
+
+  road_node_id: id
+  road_edge_start: start_node
+  road_edge_end: end_node
+  road_edge_length: length
+  road_edge_layer: road_link
+  road_node_layer: road_node
+
+  park_id: id
+  park_function_col: function
+  park_function_value: "Public Park Or Garden"
+  park_access_ref_col: ref_to_greenspace_site
+
+  tree_height_col: height
+  tree_area_col: area
+  tree_id_col: treeID
+  tree_layer: trees
+
+  # ordered coarsest → finest
+  geo_levels:
+    - RGN22CD
+    - LAD22CD
+    - LSOA21CD
+    - OA21CD
+
+output:
+  base_dir: /maps/acz25/phd-thesis-data/output/greenpy/Westminster
+
+gee_project: ee-phd-thesis
+gee_boundaries_asset: projects/ee-phd-thesis/assets/output_areas_boundaries
+
+tile_system:
+  enabled: true
+  tile_name_pattern: "VOM_([A-Z]{2}\\d{4})_"

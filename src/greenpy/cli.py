@@ -19,6 +19,7 @@ from .utils.logging_config import setup_logger
 from .utils.sedona_config import get_spark
 from . import t3 as t3_module
 from . import t30 as t30_module
+from . import t30_buildings as t30_buildings_module
 from . import t300 as t300_module
 from . import tree_count as tree_count_module
 from .optional import visibility as visibility_module
@@ -37,6 +38,7 @@ def _run_process(process: str, args_dict: dict, geo_code: str) -> object:
     process_fns = {
         "T3": t3_module.process_geo_code,
         "T30": t30_module.process_geo_code,
+        "T30_buildings": t30_buildings_module.process_geo_code,
         "T300": t300_module.process_geo_code,
         "Tree_count": tree_count_module.process_geo_code,
         "Visibility": visibility_module.process_geo_code,
@@ -51,13 +53,13 @@ def _run_process(process: str, args_dict: dict, geo_code: str) -> object:
 @app.command()
 def run(
     config: Path = typer.Option(..., "--config", "-c", help="Path to study-area YAML config file"),
-    process: str = typer.Option(..., "--process", "-p", help="Module to run: T3, T30, T300, Tree_count, Visibility, Spectral, Merge"),
+    process: str = typer.Option(..., "--process", "-p", help="Module to run: T3, T30, T30_buildings, T300, Tree_count, Visibility, Spectral, Merge"),
     geo_level: str = typer.Option(None, "--geo_level", help="Geography column to process (must be in config.columns.geo_levels)"),
     sub_geo_level: str = typer.Option(None, "--sub_geo_level", help="Sub-geography column (for Tree_count and Merge)"),
     h3_resolution: Optional[int] = typer.Option(None, "--h3_resolution", help="Aggregate to H3 hexagons at this resolution (0-15) instead of the finest census level; overrides config"),
     geo_code: Optional[str] = typer.Option(None, "--geo_code", help="Single geography code to process; omit to process all"),
     query_method: str = typer.Option("rdd", "--query_method", help="Sedona query method: sql or rdd"),
-    buffer: int = typer.Option(100, "--buffer", help="Tree count buffer radius in metres (T3)"),
+    buffer: int = typer.Option(100, "--buffer", help="Buffer radius in metres around each building (T3, T30_buildings; 0 = footprint only)"),
     tree_area: int = typer.Option(10, "--tree_area", help="Minimum tree canopy area (m²)"),
     tree_height: int = typer.Option(3, "--tree_height", help="Minimum tree height (m)"),
     observer_mode: str = typer.Option("facade", "--observer_mode", help="Visibility observer point: facade (nearest footprint boundary point to the tree) or centroid"),
@@ -77,9 +79,10 @@ def run(
 ):
     """Run one greenpy module over a study area.
 
-    T3, T30, T300, Tree_count and Visibility iterate over every code of --geo_level
-    (default: the coarsest level in config.columns.geo_levels) and write one
-    CSV per code, aggregated at --sub_geo_level (default: the finest level).
+    T3, T30, T30_buildings, T300, Tree_count and Visibility iterate over every
+    code of --geo_level (default: the coarsest level in config.columns.geo_levels)
+    and write one CSV per code, aggregated at --sub_geo_level (default: the
+    finest level; T30_buildings reports per building instead).
     Spectral does the same via Google Earth Engine. Merge consolidates all
     module CSVs into `<output.base_dir>/database/T3_30_300_spectral.parquet`
     and must run last.
@@ -87,7 +90,7 @@ def run(
     cfg = load_config(config)
     geo_levels = cfg.columns.geo_levels
 
-    valid_processes = {"T3", "T30", "T300", "Tree_count", "Visibility", "Spectral", "Merge"}
+    valid_processes = {"T3", "T30", "T30_buildings", "T300", "Tree_count", "Visibility", "Spectral", "Merge"}
     if process not in valid_processes:
         typer.echo(f"Error: --process must be one of {sorted(valid_processes)}", err=True)
         raise typer.Exit(1)
@@ -160,7 +163,7 @@ def run(
     tables = load_tables(sedona, cfg, h3_resolution=h3_resolution)
     dirs = tables["output_dirs"]
 
-    output_dir_map = {"T3": dirs["t3"], "T30": dirs["t30"], "T300": dirs["t300"], "Tree_count": dirs["tree_count"], "Visibility": dirs["visibility"]}
+    output_dir_map = {"T3": dirs["t3"], "T30": dirs["t30"], "T30_buildings": dirs["t30_buildings"], "T300": dirs["t300"], "Tree_count": dirs["tree_count"], "Visibility": dirs["visibility"]}
     output_dir = output_dir_map[process]
 
     args_dict = {

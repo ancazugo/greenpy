@@ -3,7 +3,18 @@ from pathlib import Path
 import yaml
 from loguru import logger
 
-from .schema import GreenPyConfig, ColumnMapping, DataPaths, OSMConfig, OutputPaths, TileSystemConfig, is_osm
+from .schema import (
+    GreenPyConfig,
+    ColumnMapping,
+    DataPaths,
+    OSMConfig,
+    OpenBuildingsConfig,
+    OutputPaths,
+    TileSystemConfig,
+    building_source,
+    is_open_buildings,
+    is_osm,
+)
 
 # osmnx 2.x network types
 VALID_NETWORK_TYPES = {"walk", "bike", "drive", "drive_service", "all", "all_public"}
@@ -22,11 +33,12 @@ def load_config(path: str | Path) -> GreenPyConfig:
     _require_section(columns_raw, "columns", "geo_levels")
     if not columns_raw.get("geo_levels"):
         raise ValueError("columns.geo_levels must be a non-empty list")
-    if not is_osm(data_raw["buildings"]) and not columns_raw.get("building_id"):
+    if building_source(data_raw["buildings"]) is None and not columns_raw.get("building_id"):
         raise ValueError("columns.building_id is required when data.buildings is a file path")
 
     _validate_osm_sources(data_raw, columns_raw)
     osm_cfg = _parse_osm_section(raw.get("osm") or {})
+    open_buildings_cfg = _parse_open_buildings_section(raw.get("open_buildings") or {})
 
     output_raw = raw["output"]
     _require_section(output_raw, "output", "base_dir")
@@ -86,11 +98,21 @@ def load_config(path: str | Path) -> GreenPyConfig:
             tile_name_pattern=tile_raw.get("tile_name_pattern"),
         ),
         osm=osm_cfg,
+        open_buildings=open_buildings_cfg,
     )
 
 
 def _validate_osm_sources(data_raw: dict, columns_raw: dict) -> None:
-    """Check OSM-sourced layers are consistent with the rest of the config."""
+    """Check remote-sourced layers are consistent with the rest of the config."""
+    for layer in ("parks_sites", "parks_access", "roads", "road_nodes", "census_boundaries"):
+        val = data_raw.get(layer)
+        if isinstance(val, str) and val.strip().lower() in ("overture", "open_buildings"):
+            raise ValueError(f"data.{layer} cannot be '{val}' — 'overture' and 'open_buildings' are valid only for data.buildings")
+    if is_open_buildings(data_raw["buildings"]) and columns_raw.get("building_height_col"):
+        logger.warning(
+            "Google Open Buildings has no height attribute — columns.building_height_col is ignored "
+            "with buildings: open_buildings"
+        )
     if is_osm(data_raw["census_boundaries"]):
         raise ValueError("data.census_boundaries cannot be 'osm' — it defines the study area and must be a file")
     if is_osm(data_raw["roads"]) and data_raw.get("road_nodes"):
@@ -132,6 +154,15 @@ def _parse_osm_section(osm_raw: dict) -> OSMConfig:
         exclude_private=osm_raw.get("exclude_private", True),
         fetch_buffer=fetch_buffer,
     )
+
+
+def _parse_open_buildings_section(ob_raw: dict) -> OpenBuildingsConfig:
+    confidence_threshold = ob_raw.get("confidence_threshold", 0.7)
+    if not isinstance(confidence_threshold, (int, float)) or not (0 <= confidence_threshold < 1):
+        raise ValueError(
+            f"open_buildings.confidence_threshold must be a number in [0, 1), got {confidence_threshold!r}"
+        )
+    return OpenBuildingsConfig(confidence_threshold=float(confidence_threshold))
 
 
 def _require(d: dict, *keys: str) -> None:

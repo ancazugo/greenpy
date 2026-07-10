@@ -1,0 +1,135 @@
+# Template config for a non-UK study area.
+# Replace all /path/to/... values with your actual data paths.
+
+study_area_name: MyCity
+
+# Use the projected CRS appropriate for your area (in metres).
+# Examples: EPSG:32632 (UTM 32N, central Europe), EPSG:32618 (UTM 18N, eastern US)
+crs: EPSG:32632
+
+data:
+  # Buildings, parks_sites, parks_access and roads can each be a file path OR
+  # the literal value "osm" to query the layer from OpenStreetMap (any mix is
+  # allowed). OSM layers are fetched once for the census-boundary extent and
+  # cached as parquet. See the optional `osm:` section below for defaults.
+
+  # Vector file (GeoPackage, Shapefile, GeoJSON, etc.) with building footprints —
+  # or one of the remote sources (buildings only):
+  #   "osm"            OpenStreetMap footprints (no heights)
+  #   "overture"       Overture Maps (global; height is sparse outside major cities)
+  #   "open_buildings" Google Open Buildings v3 via GEE (needs gee_project; no
+  #                    heights; Africa, South/SE Asia, Latin America & Caribbean
+  #                    only — NOT Europe or North America)
+  buildings: /path/to/buildings.gpkg
+
+  # Directory containing tree polygon vector files (one .gpkg per area/tile).
+  # Set to null if you are providing chm_tiles_dir instead.
+  trees_dir: /path/to/trees/
+
+  # Park polygon file — or "osm"
+  parks_sites: /path/to/parks.gpkg
+
+  # Park access point file (can be same file as parks_sites if no separate
+  # access points) — or "osm" to derive access points from OSM park
+  # entrances/gates and boundary-road intersections
+  parks_access: /path/to/parks_access.gpkg
+
+  # Road network file with edges and nodes as separate layers — or "osm"
+  roads: /path/to/roads.gpkg
+
+  # Census/administrative boundary polygons (one row per census unit).
+  # Always a file — this defines the study area, including for OSM queries.
+  census_boundaries: /path/to/census_tracts.gpkg
+
+  # Directory of CHM (Canopy Height Model) raster tiles (.tif).
+  # Set to null to compute T30/T30_buildings from tree polygon areas instead.
+  # Tiles must not overlap (T30_buildings sums pixel counts across tiles).
+  chm_tiles_dir: null
+
+  # Google Earth Engine canopy-height asset for T30/T30_buildings (requires
+  # gee_project below).
+  # Binarised server-side and downloaded with xee; no local canopy data needed.
+  # Example (global 1 m Meta dataset):
+  #   projects/sat-io/open-datasets/facebook/meta-canopy-height
+  # Source priority for T30 and T30_buildings:
+  #   chm_tiles_dir > canopy_height_ee_path > trees_dir.
+  canopy_height_ee_path: null
+
+columns:
+  # Name of the unique building identifier column in your buildings file
+  # (only needed when data.buildings is a file path — remote sources use
+  # canonical names)
+  building_id: building_id
+
+  # GeoPackage layer name for buildings (null = default/only layer)
+  building_layer: null
+
+  # Building height column in metres — required only for the optional Visibility
+  # module. Complete height coverage is expected: buildings (and trees) with a
+  # missing height are skipped entirely, with a warning. Not available for
+  # buildings: osm or open_buildings (no heights); buildings: overture maps its
+  # own height attribute automatically (sparse outside major cities).
+  building_height_col: null
+
+  # Road network column names
+  road_node_id: node_id
+  road_edge_start: from_node
+  road_edge_end: to_node
+  road_edge_length: length_m
+  road_edge_layer: edges
+  road_node_layer: nodes
+
+  # Park identifier column
+  park_id: park_id
+
+  # Set park_function_col and park_function_value to filter parks by type.
+  # Set both to null to use ALL features in the parks file as parks.
+  park_function_col: null
+  park_function_value: null
+
+  # Column in parks_access file linking access points to park polygons.
+  # Set to null if no such column exists (all access points will be used).
+  park_access_ref_col: null
+
+  # Tree attribute column names
+  tree_height_col: height
+  tree_area_col: area
+  tree_id_col: treeID
+  tree_layer: trees
+
+  # Geography hierarchy columns, ordered coarsest → finest.
+  # The finest level (last) is used as the spatial unit for T30 and tree count.
+  # You can have as many or as few levels as your data provides.
+  geo_levels:
+    - district_code
+    - tract_code
+
+output:
+  base_dir: /path/to/output/
+
+# OSM options — only used for layers whose data path is "osm" (see examples/osm.yaml)
+# osm:
+#   network_type: walk          # osmnx network type for roads
+#   building_types:             # building=* values; omit for residential defaults; [all] = every building
+#     - residential
+#     - house
+#     - apartments
+#   park_tags:                  # OSM tags for parks; omit for public-park defaults
+#     leisure: [park, recreation_ground]
+#     landuse: [village_green, recreation_ground]
+#   exclude_private: true       # drop parks tagged access=private/no/customers
+#   fetch_buffer: 2000          # metres around the census boundary for roads/parks
+
+# GEE configuration — only needed for the Spectral module
+gee_project: null
+gee_boundaries_asset: null
+
+# Aggregate to uniform H3 hexagons at this resolution (0-15) instead of the
+# finest geo level. Typical urban sizes: 8 ≈ 0.74 km², 9 ≈ 0.11 km², 10 ≈ 0.015 km².
+# Can also be set per run with --h3_resolution (CLI overrides config).
+# h3_resolution: 9
+
+# Tile system — set enabled: true only for UK DEFRA VOM data (or similar grid-tiled datasets)
+tile_system:
+  enabled: false
+  tile_name_pattern: null

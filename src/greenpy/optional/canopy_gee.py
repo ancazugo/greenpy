@@ -93,6 +93,9 @@ def download_binary_canopy(
 
     if cache_path is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # tag NaN as nodata so raster readers (rioxarray masked=True, Sedona
+        # RS_ZonalStats) can exclude unmapped pixels from pixel counts
+        da = da.rio.write_nodata(float("nan"))
         da.rio.to_raster(cache_path)
 
     return da

@@ -1,9 +1,33 @@
 from dataclasses import dataclass, field
 
 
+# Remote sources accepted by data.buildings instead of a file path
+BUILDING_SOURCE_SENTINELS = ("osm", "overture", "open_buildings")
+
+
+def _sentinel(source: str | None) -> str | None:
+    return source.strip().lower() if isinstance(source, str) else None
+
+
 def is_osm(source: str | None) -> bool:
     """True when a config data path requests the OSM source instead of a file."""
-    return isinstance(source, str) and source.strip().lower() == "osm"
+    return _sentinel(source) == "osm"
+
+
+def is_overture(source: str | None) -> bool:
+    """True when data.buildings requests Overture Maps building footprints."""
+    return _sentinel(source) == "overture"
+
+
+def is_open_buildings(source: str | None) -> bool:
+    """True when data.buildings requests Google Open Buildings v3 polygons (via GEE)."""
+    return _sentinel(source) == "open_buildings"
+
+
+def building_source(source: str | None) -> str | None:
+    """Sentinel name when data.buildings names a remote source, else None (file path)."""
+    s = _sentinel(source)
+    return s if s in BUILDING_SOURCE_SENTINELS else None
 
 
 @dataclass
@@ -71,6 +95,14 @@ class OSMConfig:
 
 
 @dataclass
+class OpenBuildingsConfig:
+    """Options for buildings sourced from Google Open Buildings v3 (data.buildings: open_buildings)."""
+
+    # Min detection confidence to keep (dataset values roughly in [0.5, 1))
+    confidence_threshold: float = 0.7
+
+
+@dataclass
 class OutputPaths:
     base_dir: str
 
@@ -95,3 +127,5 @@ class GreenPyConfig:
     tile_system: TileSystemConfig = field(default_factory=TileSystemConfig)
     # Options for layers with their data path set to "osm"
     osm: OSMConfig = field(default_factory=OSMConfig)
+    # Options for buildings set to "open_buildings"
+    open_buildings: OpenBuildingsConfig = field(default_factory=OpenBuildingsConfig)

@@ -9,7 +9,7 @@ import geopandas as gpd
 from loguru import logger
 from pyspark.sql.session import SparkSession
 
-from .config.schema import GreenPyConfig, is_osm
+from .config.schema import GreenPyConfig, is_open_buildings, is_osm, is_overture
 from .utils.h3_boundaries import build_h3_boundaries, build_h3_buildings_overlay, h3_column
 
 
@@ -39,6 +39,7 @@ def setup_output_dirs(cfg: GreenPyConfig) -> dict[str, Path]:
         "base": base,
         "t3": base / "T3",
         "t30": base / "T30",
+        "t30_buildings": base / "T30_buildings",
         "t300": base / "T300",
         "spectral": base / "Spectral",
         "tree_count": base / "Tree_count",
@@ -181,6 +182,18 @@ def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
 
     if is_osm(cfg.data.buildings):
         buildings_gdf = osm.fetch_osm_buildings(osm.build_query_polygon(census_gdf), cfg.osm.building_types, cfg.crs)
+    elif is_overture(cfg.data.buildings):
+        from . import overture
+        from .osm import build_query_polygon
+
+        buildings_gdf = overture.fetch_overture_buildings(build_query_polygon(census_gdf), cfg.crs)
+    elif is_open_buildings(cfg.data.buildings):
+        from . import open_buildings
+        from .osm import build_query_polygon
+
+        buildings_gdf = open_buildings.fetch_open_buildings(
+            build_query_polygon(census_gdf), cfg.open_buildings.confidence_threshold, cfg.crs, cfg.gee_project
+        )
     else:
         buildings_gdf = _read_vector(cfg.data.buildings, layer=col.building_layer).to_crs(cfg.crs)
         buildings_gdf = _rename_columns(

@@ -1,10 +1,11 @@
 """
 Final aggregation pipeline: merges T3, T30, T300, spectral, and tree count outputs.
 
-Spectral is optional throughout — when no Spectral output exists the merged
-table simply omits the spectral index columns.
+Spectral and T30_buildings are optional throughout — when their outputs don't
+exist the merged table simply omits the corresponding columns.
 """
 
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -42,6 +43,23 @@ def merge_output_csv(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: li
             continue
         sdf = sedona.read.format("csv").option("header", True).option("inferSchema", True).load(str(base / name))
         save_temp_file(sdf, db_dir / f"{name}.parquet", coalesce=1, file_format=file_format)
+
+    for buffer in _t30_buildings_buffers(base / "T30_buildings", "csv"):
+        sdf = sedona.read.format("csv").option("header", True).option("inferSchema", True).load(
+            str(base / "T30_buildings") + f"/*_{buffer}m.csv"
+        )
+        save_temp_file(sdf, db_dir / f"T30_buildings_{buffer}m.parquet", coalesce=1, file_format=file_format)
+
+
+def _t30_buildings_buffers(directory: Path, extension: str) -> list[int]:
+    """Buffer radii for which T30_buildings outputs exist in directory (from filenames)."""
+    if not directory.exists():
+        return []
+    return sorted({
+        int(m.group(1))
+        for f in directory.glob(f"T30_buildings_*m.{extension}")
+        if (m := re.search(rf"_(\d+)m\.{extension}$", f.name))
+    })
 
 
 def read_parquet_files(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: list[int], h3_resolution: int | None = None) -> dict:
@@ -81,6 +99,14 @@ def read_parquet_files(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: 
     else:
         logger.warning("No Spectral output found — merged table will omit spectral indices")
 
+    t30_buildings_buffers = _t30_buildings_buffers(db_dir, "parquet")
+    for buffer in t30_buildings_buffers:
+        sedona.read.format("parquet").load(
+            str(db_dir / f"T30_buildings_{buffer}m.parquet")
+        ).createOrReplaceTempView(f"t30_buildings_{buffer}m")
+    if not t30_buildings_buffers:
+        logger.warning("No T30_buildings output found — merged table will omit per-building canopy cover")
+
     sedona.read.format("geoparquet").load(str(db_dir / "buildings.parquet")).createOrReplaceTempView("buildings")
 
     if h3_resolution is not None:
@@ -94,7 +120,7 @@ def read_parquet_files(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: 
     sedona.read.format("geoparquet").load(str(boundaries_parquet)).createOrReplaceTempView("boundaries")
     sedona.read.format("parquet").load(str(overlay_parquet)).createOrReplaceTempView("boundaries_buildings_overlay")
 
-    return {"has_spectral": has_spectral}
+    return {"has_spectral": has_spectral, "t30_buildings_buffers": t30_buildings_buffers}
 
 
 def _sub_to_geo_join(geo_level: str, sub_geo_level: str) -> str:
@@ -141,6 +167,34 @@ def aggregate_tree_count(sedona: SparkSession, geo_level: str, sub_geo_level: st
     tree_count_agg = sedona.sql(query)
     tree_count_agg.createOrReplaceTempView("tree_count_agg")
     return tree_count_agg
+
+
+def aggregate_t30_buildings(sedona: SparkSession, geo_level: str, buffers: list[int]) -> DataFrame | None:
+    """Average per-building canopy cover up to geo_level via the buildings overlay.
+
+    One `building_canopy_cover_<buffer>m` column per buffer (named to avoid
+    clashing with T30's per-area `canopy_cover`). Returns None when no
+    T30_buildings output exists.
+    """
+    if not buffers:
+        return None
+
+    per_buffer = [
+        sedona.sql(f"""
+        SELECT bbo.{geo_level},
+        ROUND(AVG(t.canopy_cover), 2) AS building_canopy_cover_{buffer}m
+        FROM t30_buildings_{buffer}m t
+        LEFT JOIN boundaries_buildings_overlay bbo ON t.building_id = bbo.building_id
+        GROUP BY bbo.{geo_level}
+        """)
+        for buffer in buffers
+    ]
+    # full outer join: buffers may have run over different geo code sets
+    t30b_agg = per_buffer[0]
+    for sdf in per_buffer[1:]:
+        t30b_agg = t30b_agg.join(sdf, on=geo_level, how="full")
+    t30b_agg.createOrReplaceTempView("t30_buildings_agg")
+    return t30b_agg
 
 
 def merge_t30_and_spectral(sedona: SparkSession, geo_level: str, sub_geo_level: str, has_spectral: bool) -> DataFrame:
@@ -230,15 +284,20 @@ def aggregate_t3_300_by_boundaries(sedona: SparkSession, geo_level: str, t3_buff
     return t3_300_agg
 
 
-def merge_all(sedona: SparkSession, geo_level: str) -> DataFrame:
+def merge_all(sedona: SparkSession, geo_level: str, t30_buildings_buffers: list[int] | None = None) -> DataFrame:
     """Join the building-level aggregates with canopy cover, spectral indices, and tree totals."""
     ts_cols = [c for c in sedona.table("t30_spectral").columns if c != geo_level]
     sel = "".join(f", ts.{c}" for c in ts_cols)
+    t30b_sel, t30b_join = "", ""
+    if t30_buildings_buffers:
+        t30b_sel = "".join(f", tb.building_canopy_cover_{b}m" for b in t30_buildings_buffers)
+        t30b_join = f"LEFT JOIN t30_buildings_agg tb ON t3_300_agg.{geo_level} = tb.{geo_level}"
     result = sedona.sql(f"""
-    SELECT t3_300_agg.*{sel}, tca.total_trees
+    SELECT t3_300_agg.*{sel}{t30b_sel}, tca.total_trees
     FROM t3_300_agg
     LEFT JOIN t30_spectral ts ON t3_300_agg.{geo_level} = ts.{geo_level}
     LEFT JOIN tree_count_agg tca ON t3_300_agg.{geo_level} = tca.{geo_level}
+    {t30b_join}
     """)
     result.createOrReplaceTempView("t3_30_300_spectral")
     return result
@@ -265,19 +324,20 @@ def process_data(
 
     tables = read_parquet_files(sedona, cfg, t3_buffer_lst, h3_resolution=h3_resolution)
     aggregate_t30(sedona, geo_level, sub_geo_level)
+    aggregate_t30_buildings(sedona, geo_level, tables["t30_buildings_buffers"])
     aggregate_tree_count(sedona, geo_level, sub_geo_level)
     merge_t30_and_spectral(sedona, geo_level, sub_geo_level, tables["has_spectral"])
     merge_t3_and_t300(sedona, t3_buffer_lst)
     aggregate_t3_300_by_boundaries(sedona, geo_level, t3_buffer_lst)
-    result_sdf = merge_all(sedona, geo_level)
+    result_sdf = merge_all(sedona, geo_level, tables["t30_buildings_buffers"])
 
     result_df = result_sdf.toPandas()
     tree_cols = [f"tree_count_{b}m" for b in t3_buffer_lst]
     result_df[tree_cols] = result_df[tree_cols].fillna(0)
 
-    leading = [geo_level, "total_trees"] + tree_cols + [
-        "canopy_cover", "park_distance_manhattan", "park_distance_euclidean", "water_distance",
-    ]
+    leading = [geo_level, "total_trees"] + tree_cols + ["canopy_cover"] + [
+        f"building_canopy_cover_{b}m" for b in tables["t30_buildings_buffers"]
+    ] + ["park_distance_manhattan", "park_distance_euclidean", "water_distance"]
     ordered = [c for c in leading if c in result_df.columns]
     ordered += [c for c in result_df.columns if c not in ordered]
     result_df = result_df[ordered]

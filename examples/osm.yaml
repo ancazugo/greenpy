@@ -1,0 +1,58 @@
+# Minimal config sourcing buildings, parks, park access points and roads from
+# OpenStreetMap. Only the census boundaries (which define the study area) must
+# be provided as a file. Note columns.building_id is not needed for OSM buildings.
+
+study_area_name: MyCity
+
+# Projected CRS in metres appropriate for your area
+crs: EPSG:32632
+
+data:
+  buildings: osm
+  parks_sites: osm
+  parks_access: osm
+  roads: osm
+  census_boundaries: /path/to/census_tracts.gpkg
+
+  # Trees/canopy still come from your own data (or GEE) — see generic.yaml
+  trees_dir: /path/to/trees/
+
+# All optional — these are the defaults
+osm:
+  # Walkable network (osmnx network_type: walk, bike, drive, drive_service, all, all_public)
+  network_type: walk
+
+  # building=* tag values to fetch. Omit for the residential defaults:
+  # residential, house, apartments, detached, semidetached_house, terrace,
+  # bungalow, dormitory, static_caravan, houseboat. Use [all] for every building.
+  # building_types: [residential, house, apartments]
+
+  # OSM tags defining parks. Omit for the public-park defaults below.
+  # Private gardens and sports pitches are never queried by default.
+  # park_tags:
+  #   leisure: [park, recreation_ground]
+  #   landuse: [village_green, recreation_ground]
+
+  # Drop parks tagged access=private/no/customers
+  exclude_private: true
+
+  # Buffer (m) around the census boundary when fetching roads/parks/access,
+  # so the network can route to parks just outside the study area
+  fetch_buffer: 2000
+
+columns:
+  # No building_id / park / road columns needed — OSM layers use canonical names.
+  # Note: OSM buildings carry no height, so the optional Visibility module
+  # (which needs columns.building_height_col) is not available with buildings: osm.
+  # Alternatives for buildings only: "overture" (Overture Maps; heights included
+  # but sparse outside major cities) or "open_buildings" (Google Open Buildings
+  # v3 via GEE; no heights, no Europe/North America coverage — see
+  # examples/open_buildings.yaml).
+
+  # Geography hierarchy columns in the census file, ordered coarsest → finest
+  geo_levels:
+    - district_code
+    - tract_code
+
+output:
+  base_dir: /path/to/output/

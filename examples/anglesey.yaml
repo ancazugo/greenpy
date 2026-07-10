@@ -1,0 +1,49 @@
+study_area_name: Anglesey
+crs: EPSG:27700
+
+data:
+  buildings: /data/input/Verisk/Buildings_6183/edition_17_0_new_format.gpkg
+  trees_dir: /data/output/3-30-300/VOM_Trees_unique
+  parks_sites: /data/input/OS/Green_Spaces/opgrsp_gb.gpkg
+  parks_access: /data/input/OS/Green_Spaces/opgrsp_gb.gpkg
+  roads: /data/input/OS/Roads/oproad_gb.gpkg
+  census_boundaries: /data/input/ONS/Output_Areas_(December_2021)_Boundaries_EW_BFE_(V9).geojson
+  chm_tiles_dir: /data/input/Defra/VOM/unzipped_tiles
+
+columns:
+  building_id: verisk_premise_id
+  building_layer: edition_17_0_new_format
+
+  road_node_id: id
+  road_edge_start: start_node
+  road_edge_end: end_node
+  road_edge_length: length
+  road_edge_layer: road_link
+  road_node_layer: road_node
+
+  park_id: id
+  park_function_col: function
+  park_function_value: "Public Park Or Garden"
+  park_access_ref_col: ref_to_greenspace_site
+
+  tree_height_col: height
+  tree_area_col: area
+  tree_id_col: treeID
+  tree_layer: trees
+
+  # ordered coarsest → finest
+  geo_levels:
+    - RGN22CD
+    - LAD22CD
+    - LSOA21CD
+    - OA21CD
+
+output:
+  base_dir: /data/output/3-30-300
+
+gee_project: ee-phd-thesis
+gee_boundaries_asset: projects/ee-phd-thesis/assets/output_areas_boundaries
+
+tile_system:
+  enabled: true
+  tile_name_pattern: "VOM_([A-Z]{2}\\d{4})_"

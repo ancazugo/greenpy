@@ -1,0 +1,27 @@
+# Historical London (1880-1900): Booth buildings + OHM parks/roads.
+# Inputs are prepared by scripts/prepare_booth_ohm.py
+study_area_name: Booth_London
+crs: EPSG:27700
+
+data:
+  buildings: /maps/acz25/phd-thesis-data/output/greenpy/Booth/input/booth_buildings.parquet
+  parks_sites: /maps/acz25/phd-thesis-data/output/greenpy/Booth/input/ohm_parks_sites.parquet
+  parks_access: /maps/acz25/phd-thesis-data/output/greenpy/Booth/input/ohm_parks_access.parquet
+  roads: /maps/acz25/phd-thesis-data/output/greenpy/Booth/input/ohm_road_edges.parquet
+  census_boundaries: /maps/acz25/phd-thesis-data/output/greenpy/Booth/input/booth_boundary.parquet
+
+columns:
+  building_id: building_id
+
+  # road nodes/start/end are derived from the noded edge endpoints
+  road_edge_length: road_edge_length
+
+  park_id: park_id
+  park_access_ref_col: park_access_ref
+
+  # single synthetic study-area unit
+  geo_levels:
+    - city
+
+output:
+  base_dir: /maps/acz25/phd-thesis-data/output/greenpy/Booth
