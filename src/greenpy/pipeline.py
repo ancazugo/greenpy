@@ -10,7 +10,7 @@ from loguru import logger
 from pyspark.sql.session import SparkSession
 
 from .config.schema import GreenPyConfig, is_open_buildings, is_osm, is_overture
-from .utils.h3_boundaries import build_h3_boundaries, build_h3_buildings_overlay, h3_column
+from .dggs import get_system
 
 
 def _read_vector(path: str, layer: str | None = None) -> gpd.GeoDataFrame:
@@ -94,14 +94,17 @@ def _coerce_null_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return gdf
 
 
-def load_tables(sedona: SparkSession, cfg: GreenPyConfig, h3_resolution: int | None = None) -> dict:
+def load_tables(
+    sedona: SparkSession, cfg: GreenPyConfig,
+    dggs: str | None = None, dggs_resolution: int | None = None,
+) -> dict:
     """
     Load all datasets from paths in cfg, rename columns to canonical names,
     register Spark temp views, and return a dict of named GeoDataFrames.
 
-    When h3_resolution is given, the `boundaries` view (and the buildings
-    overlay) contains H3 hexagons tagged with parent census codes instead of
-    the census units themselves.
+    When a DGGS is given, the `boundaries` view (and the buildings overlay)
+    contains grid cells tagged with parent census codes instead of the census
+    units themselves.
     """
     logger.debug("Loading tables from config paths")
 
@@ -120,8 +123,8 @@ def load_tables(sedona: SparkSession, cfg: GreenPyConfig, h3_resolution: int | N
     if not buildings_parquet.exists():
         _setup_parquet_files(cfg, db_dir)
 
-    if h3_resolution is not None:
-        census_parquet, buildings_overlay_parquet = ensure_h3_files(sedona, db_dir, cfg, h3_resolution)
+    if dggs is not None:
+        census_parquet, buildings_overlay_parquet = ensure_dggs_files(sedona, db_dir, cfg, dggs, dggs_resolution)
 
     buildings_gdf = gpd.read_parquet(buildings_parquet)
     parks_sites_gdf = gpd.read_parquet(parks_sites_parquet)
@@ -136,9 +139,11 @@ def load_tables(sedona: SparkSession, cfg: GreenPyConfig, h3_resolution: int | N
     buildings_sdf = sedona.read.format("geoparquet").load(str(buildings_parquet))
     buildings_sdf.createOrReplaceTempView("buildings")
 
-    if buildings_overlay_parquet.exists():
-        overlay_sdf = sedona.read.format("parquet").load(str(buildings_overlay_parquet))
-        overlay_sdf.createOrReplaceTempView("boundaries_buildings_overlay")
+    if not buildings_overlay_parquet.exists():
+        # older parquet caches predate the overlay lookup — build it in place
+        build_buildings_overlay(db_dir, cfg)
+    overlay_sdf = sedona.read.format("parquet").load(str(buildings_overlay_parquet))
+    overlay_sdf.createOrReplaceTempView("boundaries_buildings_overlay")
 
     park_sites_filtered = _filter_parks(parks_sites_gdf, cfg)
     park_access_filtered = _filter_park_access(parks_access_gdf, park_sites_filtered, cfg)
@@ -274,32 +279,40 @@ def build_buildings_overlay(db_dir: Path, cfg: GreenPyConfig) -> None:
     _build_overlay(buildings_gdf, census_gdf, cfg.columns.geo_levels, db_dir / "census_buildings_overlay.parquet")
 
 
-def ensure_h3_files(sedona: SparkSession, db_dir: Path, cfg: GreenPyConfig, resolution: int) -> tuple[Path, Path]:
-    """Build (if missing) and return the H3 boundaries and buildings-overlay parquets.
+def ensure_dggs_files(
+    sedona: SparkSession, db_dir: Path, cfg: GreenPyConfig, system_name: str, resolution: int
+) -> tuple[Path, Path]:
+    """Build (if missing) and return the DGGS boundaries and buildings-overlay parquets.
 
-    Both are computed with Sedona's native H3 and spatial-join support. Files
-    are resolution-suffixed so multiple resolutions can coexist in the same
-    database directory.
+    Files are system- and resolution-suffixed so multiple grids can coexist in
+    the same database directory (for h3 the names match the pre-DGGS caches,
+    which stay valid).
     """
-    h3_parquet = db_dir / f"h3_boundaries_res{resolution}.parquet"
-    h3_overlay_parquet = db_dir / f"h3_buildings_overlay_res{resolution}.parquet"
+    system = get_system(system_name)
+    system.validate_resolution(resolution)
+    grid_parquet = db_dir / f"{system.name}_boundaries_res{resolution}.parquet"
+    grid_overlay_parquet = db_dir / f"{system.name}_buildings_overlay_res{resolution}.parquet"
 
-    if not h3_parquet.exists():
-        sedona.read.format("geoparquet").load(str(db_dir / "census_boundaries.parquet")) \
-            .createOrReplaceTempView("h3_census_src")
-        h3_gdf = build_h3_boundaries(sedona, "h3_census_src", resolution, cfg.columns.geo_levels, cfg.crs)
-        h3_gdf.to_parquet(h3_parquet, index=False)
+    if not grid_parquet.exists():
+        census_gdf = gpd.read_parquet(db_dir / "census_boundaries.parquet")
+        grid_gdf = system.build_boundaries(sedona, census_gdf, resolution, cfg.columns.geo_levels, cfg.crs)
+        grid_gdf.to_parquet(grid_parquet, index=False)
 
-    if not h3_overlay_parquet.exists():
-        logger.info("Building H3/buildings overlay lookup")
-        sedona.read.format("geoparquet").load(str(h3_parquet)).createOrReplaceTempView("h3_grid_src")
+    if not grid_overlay_parquet.exists():
+        logger.info(f"Building {system.name}/buildings overlay lookup")
+        sedona.read.format("geoparquet").load(str(grid_parquet)).createOrReplaceTempView("dggs_grid_src")
         sedona.read.format("geoparquet").load(str(db_dir / "buildings.parquet")) \
-            .createOrReplaceTempView("h3_buildings_src")
-        code_cols = cfg.columns.geo_levels + [h3_column(resolution)]
-        overlay_df = build_h3_buildings_overlay(sedona, "h3_buildings_src", "h3_grid_src", code_cols)
-        overlay_df.to_parquet(h3_overlay_parquet, index=False)
+            .createOrReplaceTempView("dggs_buildings_src")
+        code_cols = cfg.columns.geo_levels + [system.column_name(resolution)]
+        overlay_df = system.build_buildings_overlay(sedona, "dggs_buildings_src", "dggs_grid_src", code_cols)
+        overlay_df.to_parquet(grid_overlay_parquet, index=False)
 
-    return h3_parquet, h3_overlay_parquet
+    return grid_parquet, grid_overlay_parquet
+
+
+def ensure_h3_files(sedona: SparkSession, db_dir: Path, cfg: GreenPyConfig, resolution: int) -> tuple[Path, Path]:
+    """Deprecated: use ensure_dggs_files(..., "h3", resolution)."""
+    return ensure_dggs_files(sedona, db_dir, cfg, "h3", resolution)
 
 
 def _filter_parks(parks_sites_gdf: gpd.GeoDataFrame, cfg: GreenPyConfig) -> gpd.GeoDataFrame:

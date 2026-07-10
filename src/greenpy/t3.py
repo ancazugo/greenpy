@@ -77,14 +77,17 @@ def count_trees(sedona: SparkSession, geo_code: str) -> pd.DataFrame:
 def _attach_sub_geo_level(
     sedona, geo_tree_count_df: pd.DataFrame, geo_level: str, geo_code: str, sub_geo_level: str
 ) -> pd.DataFrame:
-    """Join the sub_geo_level code of each building (by centroid containment) onto the counts."""
-    sfx = view_suffix(geo_code)
+    """Join the sub_geo_level code of each building onto the counts.
+
+    Uses the boundaries_buildings_overlay lookup so the assignment always
+    matches the one Merge aggregates by — a spatial re-join can disagree with
+    it for buildings in cells assigned to a neighbouring geo_level unit.
+    """
     building_level_df = sedona.sql(
         f"""
-        SELECT b.building_id, bnd.{sub_geo_level}
-        FROM geo_buildings_{sfx} b
-        JOIN boundaries bnd ON ST_Contains(bnd.geometry, ST_Centroid(b.geometry))
-        WHERE bnd.{geo_level} = '{geo_code}'
+        SELECT building_id, {sub_geo_level}
+        FROM boundaries_buildings_overlay
+        WHERE {geo_level} = '{geo_code}'
         """
     ).toPandas()
     return geo_tree_count_df.merge(building_level_df, on="building_id", how="left")

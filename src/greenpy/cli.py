@@ -13,8 +13,8 @@ from loguru import logger
 from tqdm import tqdm
 
 from .config.loader import load_config
+from .dggs import RESOLUTION_RANGES, SYSTEM_NAMES, get_system
 from .pipeline import load_tables, setup_output_dirs
-from .utils.h3_boundaries import h3_column
 from .utils.logging_config import setup_logger
 from .utils.sedona_config import get_spark
 from . import t3 as t3_module
@@ -56,7 +56,9 @@ def run(
     process: str = typer.Option(..., "--process", "-p", help="Module to run: T3, T30, T30_buildings, T300, Tree_count, Visibility, Spectral, Merge"),
     geo_level: str = typer.Option(None, "--geo_level", help="Geography column to process (must be in config.columns.geo_levels)"),
     sub_geo_level: str = typer.Option(None, "--sub_geo_level", help="Sub-geography column (for Tree_count and Merge)"),
-    h3_resolution: Optional[int] = typer.Option(None, "--h3_resolution", help="Aggregate to H3 hexagons at this resolution (0-15) instead of the finest census level; overrides config"),
+    dggs: Optional[str] = typer.Option(None, "--dggs", help="Aggregate to DGGS cells instead of the finest census level: h3, s2, geohash, a5 or rhealpix; overrides config"),
+    dggs_resolution: Optional[int] = typer.Option(None, "--dggs_resolution", help="Cell resolution for --dggs (h3 0-15, s2 0-30, geohash 1-12, a5 0-30, rhealpix 0-15)"),
+    h3_resolution: Optional[int] = typer.Option(None, "--h3_resolution", help="[deprecated] Alias for --dggs h3 --dggs_resolution N"),
     geo_code: Optional[str] = typer.Option(None, "--geo_code", help="Single geography code to process; omit to process all"),
     query_method: str = typer.Option("rdd", "--query_method", help="Sedona query method: sql or rdd"),
     buffer: int = typer.Option(100, "--buffer", help="Buffer radius in metres around each building (T3, T30_buildings; 0 = footprint only)"),
@@ -103,24 +105,40 @@ def run(
         typer.echo(f"Error: --geo_level '{geo_level}' not in config.columns.geo_levels: {geo_levels}", err=True)
         raise typer.Exit(1)
 
-    h3_from_cli = h3_resolution is not None
-    if h3_resolution is None:
-        h3_resolution = cfg.h3_resolution
-    if h3_resolution is not None and process == "Spectral":
-        # Spectral aggregates server-side on a GEE boundaries asset, so hexagons don't apply
-        if h3_from_cli:
-            typer.echo("Error: Spectral uses a GEE boundaries asset and does not support --h3_resolution", err=True)
-            raise typer.Exit(1)
-        logger.warning("Spectral does not support H3 aggregation — ignoring h3_resolution from config")
-        h3_resolution = None
     if h3_resolution is not None:
-        if not 0 <= h3_resolution <= 15:
-            typer.echo(f"Error: --h3_resolution must be between 0 and 15, got {h3_resolution}", err=True)
+        if dggs is not None or dggs_resolution is not None:
+            typer.echo("Error: --h3_resolution cannot be combined with --dggs/--dggs_resolution — use only the latter", err=True)
+            raise typer.Exit(1)
+        logger.warning("--h3_resolution is deprecated; use --dggs h3 --dggs_resolution N instead")
+        dggs, dggs_resolution = "h3", h3_resolution
+
+    dggs_from_cli = dggs is not None or dggs_resolution is not None
+    if dggs is None:
+        dggs = cfg.dggs
+    if dggs_resolution is None:
+        dggs_resolution = cfg.dggs_resolution
+    if (dggs is None) != (dggs_resolution is None):
+        typer.echo("Error: --dggs and --dggs_resolution must be provided together (or via config)", err=True)
+        raise typer.Exit(1)
+    if dggs is not None and process == "Spectral":
+        # Spectral aggregates server-side on a GEE boundaries asset, so grid cells don't apply
+        if dggs_from_cli:
+            typer.echo("Error: Spectral uses a GEE boundaries asset and does not support --dggs", err=True)
+            raise typer.Exit(1)
+        logger.warning("Spectral does not support DGGS aggregation — ignoring dggs from config")
+        dggs = dggs_resolution = None
+    if dggs is not None:
+        if dggs not in SYSTEM_NAMES:
+            typer.echo(f"Error: --dggs must be one of {SYSTEM_NAMES}, got '{dggs}'", err=True)
+            raise typer.Exit(1)
+        lo, hi = RESOLUTION_RANGES[dggs]
+        if not lo <= dggs_resolution <= hi:
+            typer.echo(f"Error: --dggs_resolution for {dggs} must be between {lo} and {hi}, got {dggs_resolution}", err=True)
             raise typer.Exit(1)
         if sub_geo_level:
-            typer.echo("Error: --sub_geo_level cannot be combined with --h3_resolution (hexagons replace the sub-geography)", err=True)
+            typer.echo("Error: --sub_geo_level cannot be combined with --dggs (grid cells replace the sub-geography)", err=True)
             raise typer.Exit(1)
-        sub_geo_level = h3_column(h3_resolution)
+        sub_geo_level = get_system(dggs).column_name(dggs_resolution)
 
     log_dir = Path("logs")
     log_dir.mkdir(exist_ok=True)
@@ -130,12 +148,12 @@ def run(
         from .merge import merge_output_csv, process_data
         sedona = get_spark()
         merge_output_csv(sedona, cfg, t3_buffers)
-        if h3_resolution is not None:
-            # one output row per hexagon unless the user aggregates up to a census level
+        if dggs is not None:
+            # one output row per cell unless the user aggregates up to a census level
             merge_geo_level = geo_level or sub_geo_level
         else:
             merge_geo_level = geo_level or (geo_levels[-2] if len(geo_levels) > 1 else geo_levels[0])
-        process_data(sedona, cfg, merge_geo_level, sub_geo_level or geo_levels[-1], t3_buffers, h3_resolution=h3_resolution)
+        process_data(sedona, cfg, merge_geo_level, sub_geo_level or geo_levels[-1], t3_buffers, dggs=dggs, dggs_resolution=dggs_resolution)
         return
 
     if process == "Spectral":
@@ -160,7 +178,7 @@ def run(
         return
 
     sedona = get_spark()
-    tables = load_tables(sedona, cfg, h3_resolution=h3_resolution)
+    tables = load_tables(sedona, cfg, dggs=dggs, dggs_resolution=dggs_resolution)
     dirs = tables["output_dirs"]
 
     output_dir_map = {"T3": dirs["t3"], "T30": dirs["t30"], "T30_buildings": dirs["t30_buildings"], "T300": dirs["t300"], "Tree_count": dirs["tree_count"], "Visibility": dirs["visibility"]}

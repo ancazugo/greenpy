@@ -232,14 +232,12 @@ def compute_visibility(sedona: SparkSession, geo_code: str, buffer: int, observe
 def _attach_sub_geo_level(
     sedona, visible_df: pd.DataFrame, geo_level: str, geo_code: str, sub_geo_level: str
 ) -> pd.DataFrame:
-    """Join the sub_geo_level code of each observer building (by centroid containment)."""
-    sfx = view_suffix(geo_code)
+    """Join the sub_geo_level code of each observer building from the overlay lookup."""
     building_level_df = sedona.sql(
         f"""
-        SELECT b.building_id, bnd.{sub_geo_level}
-        FROM vis_observers_{sfx} b
-        JOIN boundaries bnd ON ST_Contains(bnd.geometry, ST_Centroid(b.geometry))
-        WHERE bnd.{geo_level} = '{geo_code}'
+        SELECT building_id, {sub_geo_level}
+        FROM boundaries_buildings_overlay
+        WHERE {geo_level} = '{geo_code}'
         """
     ).toPandas()
     return visible_df.merge(building_level_df, on="building_id", how="left")

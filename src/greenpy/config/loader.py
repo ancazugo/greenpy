@@ -51,9 +51,7 @@ def load_config(path: str | Path) -> GreenPyConfig:
     except Exception as e:
         raise ValueError(f"Invalid CRS '{raw['crs']}': {e}")
 
-    h3_resolution = raw.get("h3_resolution")
-    if h3_resolution is not None and not (isinstance(h3_resolution, int) and 0 <= h3_resolution <= 15):
-        raise ValueError(f"h3_resolution must be an integer between 0 and 15, got {h3_resolution!r}")
+    dggs, dggs_resolution = _parse_dggs(raw)
 
     return GreenPyConfig(
         study_area_name=raw["study_area_name"],
@@ -92,7 +90,8 @@ def load_config(path: str | Path) -> GreenPyConfig:
         output=OutputPaths(base_dir=output_raw["base_dir"]),
         gee_project=raw.get("gee_project"),
         gee_boundaries_asset=raw.get("gee_boundaries_asset"),
-        h3_resolution=h3_resolution,
+        dggs=dggs,
+        dggs_resolution=dggs_resolution,
         tile_system=TileSystemConfig(
             enabled=tile_raw.get("enabled", False),
             tile_name_pattern=tile_raw.get("tile_name_pattern"),
@@ -100,6 +99,33 @@ def load_config(path: str | Path) -> GreenPyConfig:
         osm=osm_cfg,
         open_buildings=open_buildings_cfg,
     )
+
+
+def _parse_dggs(raw: dict) -> tuple[str | None, int | None]:
+    """Normalize the DGGS options, mapping the deprecated h3_resolution onto them."""
+    from ..dggs import RESOLUTION_RANGES, SYSTEM_NAMES
+
+    dggs = raw.get("dggs")
+    dggs_resolution = raw.get("dggs_resolution")
+    h3_resolution = raw.get("h3_resolution")
+
+    if h3_resolution is not None:
+        if dggs is not None or dggs_resolution is not None:
+            raise ValueError("h3_resolution cannot be combined with dggs/dggs_resolution — use only the latter")
+        logger.warning("h3_resolution is deprecated; use dggs: h3 with dggs_resolution instead")
+        dggs, dggs_resolution = "h3", h3_resolution
+
+    if (dggs is None) != (dggs_resolution is None):
+        raise ValueError("dggs and dggs_resolution must be provided together")
+    if dggs is None:
+        return None, None
+
+    if dggs not in SYSTEM_NAMES:
+        raise ValueError(f"dggs must be one of {SYSTEM_NAMES}, got {dggs!r}")
+    lo, hi = RESOLUTION_RANGES[dggs]
+    if not (isinstance(dggs_resolution, int) and lo <= dggs_resolution <= hi):
+        raise ValueError(f"dggs_resolution for {dggs} must be an integer between {lo} and {hi}, got {dggs_resolution!r}")
+    return dggs, dggs_resolution
 
 
 def _validate_osm_sources(data_raw: dict, columns_raw: dict) -> None:

@@ -215,24 +215,14 @@ def process_geo_code(
         geo_park_distance_df = get_closest_park(
             sedona, geo_graph, geo_buildings_gdf, geo_park_access_gdf, geo_park_sites_gdf
         )
-        sub_geo_gdf = gpd.GeoDataFrame(
-            sedona.sql(
-                f"""
-                SELECT {sub_geo_level}, ST_Union_Aggr(geometry) AS geometry
-                FROM boundaries WHERE {geo_level} = '{geo_code}'
-                GROUP BY {sub_geo_level}
-                """
-            ).toPandas(),
-            geometry="geometry", crs=cfg.crs,
-        )
-        # Representative points so a building straddling a sub-geo border maps to one unit
-        building_points_gdf = geo_buildings_gdf[["building_id", "geometry"]].copy()
-        building_points_gdf["geometry"] = building_points_gdf.representative_point()
-        buildings_with_level = gpd.sjoin(
-            building_points_gdf,
-            sub_geo_gdf[[sub_geo_level, "geometry"]],
-            how="left",
-        ).drop_duplicates(subset="building_id")[["building_id", sub_geo_level]]
+        # Overlay lookup so the assignment always matches the one Merge aggregates by
+        buildings_with_level = sedona.sql(
+            f"""
+            SELECT building_id, {sub_geo_level}
+            FROM boundaries_buildings_overlay
+            WHERE {geo_level} = '{geo_code}'
+            """
+        ).toPandas()
         geo_park_distance_df = geo_park_distance_df.merge(buildings_with_level, on="building_id", how="left")
 
         geo_park_distance_df.to_csv(out_path, index=False)

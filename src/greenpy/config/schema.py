@@ -122,7 +122,10 @@ class GreenPyConfig:
     output: OutputPaths
     gee_project: str | None = None
     gee_boundaries_asset: str | None = None
-    # Aggregate to H3 hexagons at this resolution instead of the finest geo level
+    # Aggregate to DGGS cells instead of the finest geo level
+    dggs: str | None = None  # h3, s2, geohash, a5 or rhealpix
+    dggs_resolution: int | None = None
+    # Deprecated: use dggs: h3 + dggs_resolution (loader normalizes it there)
     h3_resolution: int | None = None
     tile_system: TileSystemConfig = field(default_factory=TileSystemConfig)
     # Options for layers with their data path set to "osm"

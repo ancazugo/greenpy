@@ -14,7 +14,7 @@ from pyspark.sql.dataframe import DataFrame
 from pyspark.sql.session import SparkSession
 
 from .config.schema import GreenPyConfig
-from .pipeline import build_buildings_overlay, ensure_h3_files
+from .pipeline import build_buildings_overlay, ensure_dggs_files
 from .utils.data_processing import save_temp_file
 
 
@@ -62,13 +62,16 @@ def _t30_buildings_buffers(directory: Path, extension: str) -> list[int]:
     })
 
 
-def read_parquet_files(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: list[int], h3_resolution: int | None = None) -> dict:
+def read_parquet_files(
+    sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: list[int],
+    dggs: str | None = None, dggs_resolution: int | None = None,
+) -> dict:
     """Register available consolidated parquet files as Spark temp views.
 
     Returns a dict with a boolean per optional table ('spectral') and raises
     if a required module output is missing. Rebuilds the buildings overlay
-    lookup if the parquet cache predates it. When h3_resolution is given, the
-    boundaries and overlay views use the H3 hexagon grid.
+    lookup if the parquet cache predates it. When a DGGS is given, the
+    boundaries and overlay views use the grid cells.
     """
     db_dir = Path(cfg.output.base_dir) / "database"
 
@@ -109,8 +112,8 @@ def read_parquet_files(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: 
 
     sedona.read.format("geoparquet").load(str(db_dir / "buildings.parquet")).createOrReplaceTempView("buildings")
 
-    if h3_resolution is not None:
-        boundaries_parquet, overlay_parquet = ensure_h3_files(sedona, db_dir, cfg, h3_resolution)
+    if dggs is not None:
+        boundaries_parquet, overlay_parquet = ensure_dggs_files(sedona, db_dir, cfg, dggs, dggs_resolution)
     else:
         boundaries_parquet = db_dir / "census_boundaries.parquet"
         overlay_parquet = db_dir / "census_buildings_overlay.parquet"
@@ -259,7 +262,7 @@ def merge_t3_and_t300(sedona: SparkSession, t3_buffer_lst: list[int]) -> DataFra
 def aggregate_t3_300_by_boundaries(sedona: SparkSession, geo_level: str, t3_buffer_lst: list[int]) -> DataFrame:
     """Average per-building T3/T300 metrics up to geo_level via the buildings overlay."""
     if geo_level in sedona.table("t3_300").columns:
-        # geo_level == sub_geo_level (e.g. H3 cells): already attached per building
+        # geo_level == sub_geo_level (e.g. DGGS cells): already attached per building
         t3_300_boundaries = sedona.table("t3_300")
     else:
         t3_300_boundaries = sedona.sql(f"""
@@ -309,7 +312,8 @@ def process_data(
     geo_level: str,
     sub_geo_level: str,
     t3_buffer_lst: list[int] = None,
-    h3_resolution: int | None = None,
+    dggs: str | None = None,
+    dggs_resolution: int | None = None,
 ) -> pd.DataFrame:
     """Run the full merge pipeline and write database/T3_30_300_spectral.parquet.
 
@@ -322,7 +326,7 @@ def process_data(
 
     logger.info("Starting merge pipeline")
 
-    tables = read_parquet_files(sedona, cfg, t3_buffer_lst, h3_resolution=h3_resolution)
+    tables = read_parquet_files(sedona, cfg, t3_buffer_lst, dggs=dggs, dggs_resolution=dggs_resolution)
     aggregate_t30(sedona, geo_level, sub_geo_level)
     aggregate_t30_buildings(sedona, geo_level, tables["t30_buildings_buffers"])
     aggregate_tree_count(sedona, geo_level, sub_geo_level)
