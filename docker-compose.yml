@@ -1,0 +1,31 @@
+# Convenience wiring for running greenpy in Docker.
+#
+#   docker compose build
+#   docker compose run --rm greenpy run -c /config/city.yaml -p T3 --buffer 100
+#
+# The `greenpy` entrypoint is inherited from the image, so the command you pass
+# to `docker compose run` is the CLI arguments (e.g. `run -c ... -p T30`).
+services:
+  greenpy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: greenpy:latest
+    volumes:
+      # Your input data — reference these container paths inside the YAML config.
+      - ./data:/data
+      # YAML config file(s).
+      - ./config:/config
+      # Writable working dir: outputs, logs/, spark-warehouse/, cache/.
+      - ./output:/work
+      # Uncomment for the optional GEE features (Spectral / GEE canopy /
+      # open_buildings). Authenticate once on the host with `earthengine
+      # authenticate`, then mount the credentials read-only:
+      # - ${HOME}/.config/earthengine:/home/greenpy/.config/earthengine:ro
+    environment:
+      DATA_DIR: /data
+      # Only needed for the optional GEE features.
+      # GEE_PROJECT_NAME: my-gee-project
+      # Spark heap — raise these if you have the RAM.
+      SPARK_DRIVER_MEMORY: 4g
+      SPARK_EXECUTOR_MEMORY: 2g

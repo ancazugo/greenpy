@@ -13,6 +13,11 @@ def get_spark() -> SparkSession:
     if JAVA_HOME:
         os.environ["JAVA_HOME"] = JAVA_HOME
 
+    # Memory is env-configurable so the Docker image (and modest machines) can
+    # dial it down; defaults preserve the original local behaviour.
+    driver_mem = os.getenv("SPARK_DRIVER_MEMORY", "64g")
+    executor_mem = os.getenv("SPARK_EXECUTOR_MEMORY", "32g")
+
     config = (
         SedonaContext.builder()
         .config(
@@ -30,8 +35,8 @@ def get_spark() -> SparkSession:
         .config("spark.sql.debug.maxToStringFields", 10000)
         .config("spark.default.parallelism", 200)
         .config("spark.sql.adaptive.coalescePartitions.enabled", False)
-        .config("spark.executor.memory", "32g")
-        .config("spark.driver.memory", "64g")
+        .config("spark.executor.memory", executor_mem)
+        .config("spark.driver.memory", driver_mem)
         .config("spark.driver.maxResultSize", "15g")
         .master("local[10,0]")
     ).getOrCreate()
