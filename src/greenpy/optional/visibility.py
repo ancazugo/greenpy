@@ -240,6 +240,9 @@ def _attach_sub_geo_level(
         WHERE {geo_level} = '{geo_code}'
         """
     ).toPandas()
+    # ids may be numeric in file-backed sources while views return strings
+    building_level_df["building_id"] = building_level_df["building_id"].astype(str)
+    visible_df = visible_df.assign(building_id=visible_df["building_id"].astype(str))
     return visible_df.merge(building_level_df, on="building_id", how="left")
 
 

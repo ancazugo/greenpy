@@ -71,6 +71,8 @@ def load_config(path: str | Path) -> GreenPyConfig:
             building_id=columns_raw.get("building_id"),
             building_layer=columns_raw.get("building_layer"),
             building_height_col=columns_raw.get("building_height_col"),
+            building_use_col=columns_raw.get("building_use_col"),
+            building_use_value=columns_raw.get("building_use_value"),
             road_node_id=columns_raw.get("road_node_id", "id"),
             road_edge_start=columns_raw.get("road_edge_start", "start_node"),
             road_edge_end=columns_raw.get("road_edge_end", "end_node"),
@@ -138,6 +140,11 @@ def _validate_osm_sources(data_raw: dict, columns_raw: dict) -> None:
         logger.warning(
             "Google Open Buildings has no height attribute — columns.building_height_col is ignored "
             "with buildings: open_buildings"
+        )
+    if building_source(data_raw["buildings"]) is not None and columns_raw.get("building_use_col"):
+        logger.warning(
+            "columns.building_use_col is ignored for remote building sources — "
+            "restrict OSM buildings with osm.building_types instead"
         )
     if is_osm(data_raw["census_boundaries"]):
         raise ValueError("data.census_boundaries cannot be 'osm' — it defines the study area and must be a file")

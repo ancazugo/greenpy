@@ -37,6 +37,10 @@ class ColumnMapping:
     building_layer: str | None = None
     # Building height in metres — required only by the Visibility module
     building_height_col: str | None = None
+    # Keep only buildings whose building_use_col matches building_use_value (a
+    # single value or a list). File-based sources only; OSM uses osm.building_types.
+    building_use_col: str | None = None
+    building_use_value: str | list[str] | None = None
 
     # Roads
     road_node_id: str = "id"

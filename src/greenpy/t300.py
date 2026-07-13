@@ -223,6 +223,9 @@ def process_geo_code(
             WHERE {geo_level} = '{geo_code}'
             """
         ).toPandas()
+        # ids may be numeric in file-backed sources while views return strings
+        buildings_with_level["building_id"] = buildings_with_level["building_id"].astype(str)
+        geo_park_distance_df = geo_park_distance_df.assign(building_id=geo_park_distance_df["building_id"].astype(str))
         geo_park_distance_df = geo_park_distance_df.merge(buildings_with_level, on="building_id", how="left")
 
         geo_park_distance_df.to_csv(out_path, index=False)

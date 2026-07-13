@@ -90,6 +90,9 @@ def _attach_sub_geo_level(
         WHERE {geo_level} = '{geo_code}'
         """
     ).toPandas()
+    # the RDD query path returns building_id as string while file-backed ids may be numeric
+    building_level_df["building_id"] = building_level_df["building_id"].astype(str)
+    geo_tree_count_df = geo_tree_count_df.assign(building_id=geo_tree_count_df["building_id"].astype(str))
     return geo_tree_count_df.merge(building_level_df, on="building_id", how="left")
 
 

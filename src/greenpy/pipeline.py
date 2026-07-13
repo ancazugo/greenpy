@@ -201,6 +201,7 @@ def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
         )
     else:
         buildings_gdf = _read_vector(cfg.data.buildings, layer=col.building_layer).to_crs(cfg.crs)
+        buildings_gdf = _filter_buildings(buildings_gdf, cfg)
         buildings_gdf = _rename_columns(
             buildings_gdf, {col.building_id: "building_id", col.building_height_col: "building_height"}
         )
@@ -313,6 +314,29 @@ def ensure_dggs_files(
 def ensure_h3_files(sedona: SparkSession, db_dir: Path, cfg: GreenPyConfig, resolution: int) -> tuple[Path, Path]:
     """Deprecated: use ensure_dggs_files(..., "h3", resolution)."""
     return ensure_dggs_files(sedona, db_dir, cfg, "h3", resolution)
+
+
+def _filter_buildings(buildings_gdf: gpd.GeoDataFrame, cfg: GreenPyConfig) -> gpd.GeoDataFrame:
+    """Keep only buildings matching building_use_value if a use filter is configured.
+
+    building_use_value may be a single value or a list; when unset all buildings
+    are kept. File-based sources only (OSM is filtered at fetch by building_types).
+    """
+    col = cfg.columns
+    if not (col.building_use_col and col.building_use_value is not None):
+        return buildings_gdf
+    if col.building_use_col not in buildings_gdf.columns:
+        raise ValueError(
+            f"building_use_col '{col.building_use_col}' not found in buildings columns: "
+            f"{list(buildings_gdf.columns)}"
+        )
+    values = col.building_use_value if isinstance(col.building_use_value, list) else [col.building_use_value]
+    n_before = len(buildings_gdf)
+    buildings_gdf = buildings_gdf[buildings_gdf[col.building_use_col].isin(values)].reset_index(drop=True)
+    logger.info(f"Filtered buildings on {col.building_use_col} in {values}: {n_before} → {len(buildings_gdf)}")
+    if buildings_gdf.empty:
+        raise ValueError(f"No buildings match building_use_value {values} in column '{col.building_use_col}'")
+    return buildings_gdf
 
 
 def _filter_parks(parks_sites_gdf: gpd.GeoDataFrame, cfg: GreenPyConfig) -> gpd.GeoDataFrame:
