@@ -96,14 +96,15 @@ class DGGS(abc.ABC):
         """Return a building_id → cell/census-codes lookup as a pandas DataFrame.
 
         Buildings are reduced to a point on their surface so each maps to exactly
-        one cell (mirrors the representative-point logic of the census overlay).
+        one cell (mirrors the representative-point logic of the census overlay);
+        a point on a shared cell edge intersects both cells and keeps one.
         """
         sel = ", ".join(f"g.{c}" for c in code_cols)
         overlay_df = sedona.sql(
             f"""
             SELECT b.building_id, {sel}
             FROM {buildings_view} b
-            JOIN {grid_view} g ON ST_Contains(g.geometry, ST_PointOnSurface(b.geometry))
+            JOIN {grid_view} g ON ST_Intersects(g.geometry, ST_PointOnSurface(b.geometry))
             """
         ).toPandas()
         return overlay_df.drop_duplicates(subset="building_id")

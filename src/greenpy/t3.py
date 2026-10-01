@@ -27,19 +27,19 @@ def read_trees_unique(
     geo_code: str,
     tree_area: int = 10,
     tree_height: int = 3,
-    tree_paths: list[Path] | None = None,
 ) -> DataFrame:
     """Load trees for the geo_code boundary and register the `geo_trees_<geo_code>` view.
 
-    Reads either a single tree file, an explicit list of tile paths, or the
-    files in trees_dir overlapping the boundary. Columns are renamed to the
+    Reads either a single tree file or the files in trees_dir overlapping
+    geo_boundary_gdf (pass it buffered by the building buffer so edge
+    buildings see trees in neighbouring tiles). Columns are renamed to the
     canonical tree_height/tree_area names and reprojected to cfg.crs, then
-    filtered (area > tree_area, height > tree_height) and reduced to centroids
-    with a generated tree_id.
+    filtered (area > tree_area, height > tree_height, both strict) and reduced
+    to centroids with a generated tree_id.
     """
     logger.debug(f"Reading tree vector files for {geo_code}")
 
-    geo_trees_gdf = load_trees_gdf(trees_dir, geo_boundary_gdf, cfg, tree_paths=tree_paths)
+    geo_trees_gdf = load_trees_gdf(trees_dir, geo_boundary_gdf, cfg)
 
     geo_trees_sdf = sedona.createDataFrame(geo_trees_gdf)
     if "geom" in geo_trees_sdf.columns:
@@ -108,8 +108,6 @@ def process_geo_code(
     tree_area: int = 10,
     tree_height: int = 3,
     overwrite: bool = True,
-    # tile-mode optional args
-    overlapping_tiles_lst: list | None = None,
 ) -> pd.DataFrame | None:
     """Compute T3 (trees within `buffer` metres of each building) for one geo_code.
 
@@ -126,24 +124,19 @@ def process_geo_code(
         return pd.read_csv(out_path)
 
     try:
-        get_geometries(sedona, geo_level, geo_code, dissolve=True)
+        geo_boundary_sdf = get_geometries(sedona, geo_level, geo_code, dissolve=True)
         geo_buildings_buffer_sdf = filter_buffer_geometries(
             sedona, geo_level, geo_code, "buildings", buffer, id_col="building_id"
         )
 
         trees_dir = Path(cfg.data.trees_dir)
-        geo_boundary_gdf = gpd.GeoDataFrame(
-            get_geometries(sedona, geo_level, geo_code, dissolve=True).toPandas(),
-            geometry="geometry", crs=cfg.crs,
-        )
-
-        tree_paths = None
-        if cfg.tile_system.enabled and overlapping_tiles_lst is not None:
-            # Tile-mode: pre-filter tile files by name substrings
-            tree_paths = [p for p in trees_dir.glob("*.gpkg") if any(t in p.name for t in overlapping_tiles_lst)]
+        # Buffers reach `buffer` metres past the boundary, so trees are searched
+        # against the widened boundary too
+        search_gdf = gpd.GeoDataFrame(geo_boundary_sdf.toPandas(), geometry="geometry", crs=cfg.crs)
+        search_gdf["geometry"] = search_gdf.buffer(buffer or 0)
 
         geo_trees_sdf = read_trees_unique(
-            sedona, trees_dir, geo_boundary_gdf, cfg, geo_code, tree_area, tree_height, tree_paths=tree_paths
+            sedona, trees_dir, search_gdf, cfg, geo_code, tree_area, tree_height
         )
 
         if query_method == "sql":

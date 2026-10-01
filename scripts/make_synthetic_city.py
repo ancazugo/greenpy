@@ -21,6 +21,7 @@ from shapely.geometry import Point, LineString, box
 CRS = "EPSG:32632"
 ORIGIN_X, ORIGIN_Y = 500_000, 5_000_000  # valid UTM 32N coordinates
 TRACT = 200  # tract side in metres
+CHM_NODATA = -9999.0
 
 
 def main(target: Path) -> None:
@@ -70,6 +71,9 @@ def main(target: Path) -> None:
     # 10 m tree 30 m from the facade. Visible from middle/top only.
     buildings.append({"bid": "B_OBS", "bh": 20.0, "geometry": box(ORIGIN_X + 640, ORIGIN_Y + 695, ORIGIN_X + 650, ORIGIN_Y + 705)})
     buildings.append({"bid": "B_WALL", "bh": 8.0, "geometry": box(ORIGIN_X + 660, ORIGIN_Y + 680, ORIGIN_X + 664, ORIGIN_Y + 720)})
+    # Straddles the D00/D10 district boundary (x = +400): must be owned by
+    # exactly one district in every per-building output.
+    buildings.append({"bid": "B_EDGE", "bh": 12.0, "geometry": box(ORIGIN_X + 395, ORIGIN_Y + 100, ORIGIN_X + 405, ORIGIN_Y + 110)})
     gpd.GeoDataFrame(buildings, crs=CRS).to_file(data_dir / "buildings.gpkg", driver="GPKG")
 
     # Trees: random canopy circles across the city, varying size and height
@@ -87,6 +91,12 @@ def main(target: Path) -> None:
     # the deterministic scenario's tree
     scenario_tree = Point(ORIGIN_X + 680, ORIGIN_Y + 700).buffer(2.0)
     trees.append({"h": 10.0, "a": round(scenario_tree.area, 1), "geometry": scenario_tree})
+    # 20x20 m crown straddling the T0000/T0010 tract boundary (x = +200):
+    # 200 m2 of canopy belongs to each tract.
+    trees.append({"h": 12.0, "a": 400.0, "geometry": box(ORIGIN_X + 190, ORIGIN_Y + 20, ORIGIN_X + 210, ORIGIN_Y + 40)})
+    # Two identical overlapping 10x10 m crowns: 100 m2 of canopy, not 200.
+    for _ in range(2):
+        trees.append({"h": 12.0, "a": 100.0, "geometry": box(ORIGIN_X + 300, ORIGIN_Y + 300, ORIGIN_X + 310, ORIGIN_Y + 310)})
     gpd.GeoDataFrame(trees, crs=CRS).to_file(trees_dir / "trees_tile_1.gpkg", driver="GPKG")
 
     # CHM raster tiles: the same tree canopies rasterised at 1 m resolution
@@ -106,9 +116,13 @@ def main(target: Path) -> None:
         width, height = int(x1 - x0), int(chm_maxy - chm_miny)
         transform = from_origin(x0, chm_maxy, 1.0, 1.0)
         arr = rasterize(shapes, out_shape=(height, width), transform=transform, fill=0.0, dtype="float32")
+        if name == "chm_west":
+            # 20 m nodata strip (x = +50..+70): T30 and T30_buildings must both
+            # exclude it from valid pixels rather than count it as no-canopy
+            arr[:, margin + 50:margin + 70] = CHM_NODATA
         with rasterio.open(
             chm_dir / f"{name}.tif", "w", driver="GTiff", height=height, width=width,
-            count=1, dtype="float32", crs=CRS, transform=transform,
+            count=1, dtype="float32", crs=CRS, transform=transform, nodata=CHM_NODATA,
         ) as dst:
             dst.write(arr, 1)
 

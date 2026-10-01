@@ -6,7 +6,6 @@ import geopandas as gpd
 import networkx as nx
 import osmnx as ox
 from loguru import logger
-from tqdm import tqdm
 from pyspark.sql.session import SparkSession
 
 from .config.schema import GreenPyConfig
@@ -22,13 +21,16 @@ def filter_features(
     road_edges_gdf: gpd.GeoDataFrame,
     geo_boundary_gdf: gpd.GeoDataFrame,
     cfg: GreenPyConfig,
-    search_buffer: int = 2000,
+    search_buffer: int | None = None,
 ) -> tuple:
-    """Spatially filter roads, parks, and buildings to the geo_code boundary.
+    """Spatially filter roads, parks, and buildings to the geo_code.
 
-    Buildings are filtered to the exact OA boundary. Roads and parks use a
-    buffered boundary so the network can route to parks outside the OA.
+    Buildings are those owned by geo_code in the buildings overlay. Roads and
+    parks use the boundary buffered by search_buffer metres (default
+    cfg.osm.fetch_buffer, 2000 m) so the network can route to parks outside it.
     """
+    if search_buffer is None:
+        search_buffer = cfg.osm.fetch_buffer
     logger.debug("Filtering GeoDataFrames by spatial join")
 
     buffered = geo_boundary_gdf.copy()
@@ -82,29 +84,27 @@ def get_road_graph_distances(
     """Build road network graph and snap buildings + park accesses to nearest nodes."""
     logger.debug("Generating road graph")
 
+    if "road_edge_length" not in geo_road_edges_gdf.columns or geo_road_edges_gdf["road_edge_length"].isna().any():
+        # networkx would silently weight missing lengths as 1 (hop counts)
+        raise ValueError(
+            "Road edges lack road_edge_length — set columns.road_edge_length, or delete the "
+            "database/ cache so it is recomputed from edge geometry"
+        )
     geo_graph = ox.graph_from_gdfs(geo_road_nodes_gdf, geo_road_edges_gdf).to_undirected()
 
-    park_node_ids, park_node_dists = ox.distance.nearest_nodes(
-        geo_graph,
-        geo_park_access_gdf.geometry.centroid.x,
-        geo_park_access_gdf.geometry.centroid.y,
-        return_dist=True,
-    )
-    geo_park_access_gdf = geo_park_access_gdf.copy()
-    geo_park_access_gdf["nearest_road_node"] = park_node_ids
-    geo_park_access_gdf["nearest_road_node_distance"] = park_node_dists
+    def _snap(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+        gdf = gdf.copy()
+        if gdf.empty:
+            gdf["nearest_road_node"] = pd.Series(dtype=object)
+            gdf["nearest_road_node_distance"] = pd.Series(dtype=float)
+            return gdf
+        centroids = gdf.geometry.centroid
+        ids, dists = ox.distance.nearest_nodes(geo_graph, centroids.x, centroids.y, return_dist=True)
+        gdf["nearest_road_node"] = ids
+        gdf["nearest_road_node_distance"] = dists
+        return gdf
 
-    building_node_ids, building_node_dists = ox.distance.nearest_nodes(
-        geo_graph,
-        geo_buildings_gdf.geometry.centroid.x,
-        geo_buildings_gdf.geometry.centroid.y,
-        return_dist=True,
-    )
-    geo_buildings_gdf = geo_buildings_gdf.copy()
-    geo_buildings_gdf["nearest_road_node"] = building_node_ids
-    geo_buildings_gdf["nearest_road_node_distance"] = building_node_dists
-
-    return geo_graph, geo_park_access_gdf, geo_buildings_gdf
+    return geo_graph, _snap(geo_park_access_gdf), _snap(geo_buildings_gdf)
 
 
 def get_closest_park_manhattan(
@@ -112,41 +112,45 @@ def get_closest_park_manhattan(
     geo_buildings_gdf: gpd.GeoDataFrame,
     geo_park_access_gdf: gpd.GeoDataFrame,
 ) -> pd.DataFrame:
-    """Network shortest-path (Dijkstra) distance from each building to its nearest park access point.
+    """Network shortest-path distance from each building to its nearest park access point.
 
     Despite the historical name and output column (`distance_manhattan`, kept
     for compatibility), this is road-network distance weighted by
     road_edge_length, plus the straight-line snap distances of building and
-    access point to their nearest road nodes. Unreachable buildings get None.
+    access point to their nearest road nodes. Computed with a single
+    multi-source Dijkstra from a virtual source linked to every access node
+    (weighted by its snap distance), which equals the minimum over all access
+    points. Unreachable buildings get None.
     """
     logger.debug(f"Computing park distances for {len(geo_buildings_gdf)} buildings, {len(geo_park_access_gdf)} access points")
 
-    park_access_nodes = geo_park_access_gdf["nearest_road_node"].unique()
-    shortest_paths = {}
-    for node in tqdm(park_access_nodes, desc="Park access nodes"):
-        shortest_paths[node] = nx.single_source_dijkstra_path_length(geo_graph, node, weight="road_edge_length")
+    # per road node: the closest access point snapped to it
+    best_access = (
+        geo_park_access_gdf.sort_values("nearest_road_node_distance")
+        .drop_duplicates("nearest_road_node")
+        .set_index("nearest_road_node")
+    )
+    source = object()  # virtual node, cannot collide with road node ids
+    graph = nx.Graph()
+    for u, v, w in geo_graph.edges(data="road_edge_length"):
+        if not graph.has_edge(u, v) or w < graph[u][v]["w"]:
+            graph.add_edge(u, v, w=w)
+    for node, row in best_access.iterrows():
+        graph.add_edge(source, node, w=row["nearest_road_node_distance"])
+
+    dist, paths = (
+        nx.single_source_dijkstra(graph, source, weight="w") if len(best_access) else ({}, {})
+    )
 
     distances = []
-    for building in tqdm(geo_buildings_gdf.itertuples(), desc="Buildings processed"):
-        building_node = building.nearest_road_node
-        building_id = building.building_id
-        building_road_dist = building.nearest_road_node_distance
-        min_distance = float("inf")
-        closest_park_access_id = None
-
-        for park_access in geo_park_access_gdf.itertuples():
-            park_node = park_access.nearest_road_node
-            park_road_dist = park_access.nearest_road_node_distance
-            try:
-                d = shortest_paths[park_node][building_node] + building_road_dist + park_road_dist
-                if d < min_distance:
-                    min_distance = d
-                    closest_park_access_id = park_access.park_id
-            except KeyError:
-                # building node unreachable from this park access node
-                pass
-
-        distances.append((building_id, closest_park_access_id, None if min_distance == float("inf") else round(min_distance, 1)))
+    for building in geo_buildings_gdf.itertuples():
+        node = building.nearest_road_node
+        if node in dist:
+            access_node = paths[node][1]
+            d = round(dist[node] + building.nearest_road_node_distance, 1)
+            distances.append((building.building_id, best_access.at[access_node, "park_id"], d))
+        else:
+            distances.append((building.building_id, None, None))
 
     return pd.DataFrame(distances, columns=["building_id", "closest_park_access_id", "distance_manhattan"])
 
@@ -156,6 +160,12 @@ def get_closest_park_euclidean(
     geo_park_sites_gdf: gpd.GeoDataFrame,
 ) -> pd.DataFrame:
     """Euclidean (straight-line) distance from each building to nearest park site polygon."""
+    if geo_park_sites_gdf.empty:
+        return pd.DataFrame({
+            "building_id": geo_buildings_gdf["building_id"],
+            "closest_park_site_id": None,
+            "distance_euclidean": float("nan"),
+        })
     result = gpd.sjoin_nearest(geo_buildings_gdf, geo_park_sites_gdf, distance_col="distance_euclidean")
     result["distance_euclidean"] = result["distance_euclidean"].round(1)
     # sjoin_nearest returns one row per tied nearest park — keep one per building
@@ -170,10 +180,14 @@ def get_closest_park(
     geo_park_access_gdf: gpd.GeoDataFrame,
     geo_park_sites_gdf: gpd.GeoDataFrame,
 ) -> pd.DataFrame:
-    """Combine network and Euclidean nearest-park distances into one row per building."""
+    """Combine network and Euclidean nearest-park distances into one row per building.
+
+    Every building is kept: with no reachable park (or none within the search
+    buffer) its distances are null.
+    """
     manhattan_df = get_closest_park_manhattan(geo_graph, geo_buildings_gdf, geo_park_access_gdf)
     euclidean_df = get_closest_park_euclidean(geo_buildings_gdf, geo_park_sites_gdf)
-    return pd.merge(manhattan_df, euclidean_df, on="building_id")
+    return pd.merge(manhattan_df, euclidean_df, on="building_id", how="left")
 
 
 def process_geo_code(

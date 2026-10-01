@@ -55,25 +55,29 @@ def run(
     config: Path = typer.Option(..., "--config", "-c", help="Path to study-area YAML config file"),
     process: str = typer.Option(..., "--process", "-p", help="Module to run: T3, T30, T30_buildings, T300, Tree_count, Visibility, Spectral, Merge"),
     geo_level: str = typer.Option(None, "--geo_level", help="Geography column to process (must be in config.columns.geo_levels)"),
-    sub_geo_level: str = typer.Option(None, "--sub_geo_level", help="Sub-geography column (for Tree_count and Merge)"),
+    sub_geo_level: str = typer.Option(None, "--sub_geo_level", help="Sub-geography column results are reported at (default: finest level in config.columns.geo_levels)"),
     dggs: Optional[str] = typer.Option(None, "--dggs", help="Aggregate to DGGS cells instead of the finest census level: h3, s2, geohash, a5 or rhealpix; overrides config"),
     dggs_resolution: Optional[int] = typer.Option(None, "--dggs_resolution", help="Cell resolution for --dggs (h3 0-15, s2 0-30, geohash 1-12, a5 0-30, rhealpix 0-15)"),
     h3_resolution: Optional[int] = typer.Option(None, "--h3_resolution", help="[deprecated] Alias for --dggs h3 --dggs_resolution N"),
     geo_code: Optional[str] = typer.Option(None, "--geo_code", help="Single geography code to process; omit to process all"),
     query_method: str = typer.Option("rdd", "--query_method", help="Sedona query method: sql or rdd"),
     buffer: int = typer.Option(100, "--buffer", help="Buffer radius in metres around each building (T3, T30_buildings; 0 = footprint only)"),
-    tree_area: int = typer.Option(10, "--tree_area", help="Minimum tree canopy area (m²)"),
-    tree_height: int = typer.Option(3, "--tree_height", help="Minimum tree height (m)"),
+    tree_area: int = typer.Option(10, "--tree_area", help="Trees count only if canopy area (m²) is strictly greater than this (T3, Visibility)"),
+    tree_height: int = typer.Option(3, "--tree_height", help="Trees count only if height (m) is strictly greater than this (T3, Visibility)"),
     observer_mode: str = typer.Option("facade", "--observer_mode", help="Visibility observer point: facade (nearest footprint boundary point to the tree) or centroid"),
     low_threshold: int = typer.Option(3, "--low_threshold", help="Min canopy height in metres for T30 binarisation"),
     high_threshold: int = typer.Option(60, "--high_threshold", help="Max canopy height in metres for T30 binarisation"),
-    gee_scale: float = typer.Option(1.0, "--gee_scale", help="Download scale in metres for the T30 GEE canopy source"),
+    gee_scale: float = typer.Option(1.0, "--gee_scale", help="Download scale in metres for the T30 GEE canopy source (coarser scales store canopy fraction per pixel)"),
     start_date: str = typer.Option("2024-01-01", "--start_date", help="GEE imagery start date"),
     end_date: str = typer.Option("2024-12-31", "--end_date", help="GEE imagery end date"),
     imagery_ee_path: str = typer.Option("COPERNICUS/S2_HARMONIZED", "--imagery_ee_path", help="GEE imagery collection path"),
     cloud_coverage: float = typer.Option(10.0, "--cloud_coverage", help="Max cloud coverage percentage"),
     spectral_indexes: list[str] = typer.Option(["NDVI", "NDWI", "NDBI"], "--spectral_indexes", help="Spectral indices to compute"),
+    composite: str = typer.Option("max", "--composite", help="Spectral temporal composite over the date range: max (default) or median"),
     t3_buffers: list[int] = typer.Option([10, 25, 50, 75, 100], "--t3_buffers", help="T3 buffer sizes for Merge step"),
+    rule_t3_buffer: int = typer.Option(50, "--rule_t3_buffer", help="Merge: T3 buffer (m) whose count must be >= 3 for the rule's '3'"),
+    rule_t30_buffer: Optional[int] = typer.Option(None, "--rule_t30_buffer", help="Merge: use T30_buildings canopy within this buffer (m) for the rule's '30' instead of the building's sub-geo unit canopy"),
+    rule_distance: str = typer.Option("euclidean", "--rule_distance", help="Merge: park distance for the rule's '300': euclidean (straight line, WHO) or network"),
     parallel: bool = typer.Option(False, "--parallel", is_flag=True, help="Run geo codes in parallel"),
     n_workers: int = typer.Option(2, "--n_workers", help="Number of parallel workers"),
     log_level: str = typer.Option("INFO", "--log_level", help="Logging level"),
@@ -95,6 +99,14 @@ def run(
     valid_processes = {"T3", "T30", "T30_buildings", "T300", "Tree_count", "Visibility", "Spectral", "Merge"}
     if process not in valid_processes:
         typer.echo(f"Error: --process must be one of {sorted(valid_processes)}", err=True)
+        raise typer.Exit(1)
+
+    if rule_distance not in ("euclidean", "network"):
+        typer.echo(f"Error: --rule_distance must be 'euclidean' or 'network', got '{rule_distance}'", err=True)
+        raise typer.Exit(1)
+
+    if composite not in ("max", "median"):
+        typer.echo(f"Error: --composite must be 'max' or 'median', got '{composite}'", err=True)
         raise typer.Exit(1)
 
     if observer_mode not in ("facade", "centroid"):
@@ -153,7 +165,11 @@ def run(
             merge_geo_level = geo_level or sub_geo_level
         else:
             merge_geo_level = geo_level or (geo_levels[-2] if len(geo_levels) > 1 else geo_levels[0])
-        process_data(sedona, cfg, merge_geo_level, sub_geo_level or geo_levels[-1], t3_buffers, dggs=dggs, dggs_resolution=dggs_resolution)
+        process_data(
+            sedona, cfg, merge_geo_level, sub_geo_level or geo_levels[-1], t3_buffers,
+            dggs=dggs, dggs_resolution=dggs_resolution,
+            rule_t3_buffer=rule_t3_buffer, rule_t30_buffer=rule_t30_buffer, rule_distance=rule_distance,
+        )
         return
 
     if process == "Spectral":
@@ -172,6 +188,7 @@ def run(
                 imagery_ee_path, start_date, end_date, cloud_coverage,
                 spectral_indexes,
                 output_dir=tables["output_dirs"]["spectral"],
+                composite=composite,
                 gee_boundaries_asset=cfg.gee_boundaries_asset,
                 overwrite=overwrite,
             )

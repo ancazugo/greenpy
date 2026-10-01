@@ -41,12 +41,13 @@ _LEVELS = {"bottom": "0.0D", "middle": "{h} / 2.0D", "top": "{h}"}
 _ENDPOINT_EPSILON = 0.05
 
 
-def _register_vis_buildings(sedona: SparkSession, geo_code: str, buffer: int) -> None:
+def _register_vis_buildings(sedona: SparkSession, geo_level: str, geo_code: str, buffer: int) -> None:
     """Register vis_buildings_<sfx> (obstacles, buffered extent) and vis_observers_<sfx>.
 
     Obstacle buildings are clipped to the boundary buffered by `buffer` metres so
-    buildings just outside the study area still occlude; observers are the subset
-    intersecting the unbuffered boundary. Buildings with missing or non-positive
+    buildings just outside the study area still occlude; observers are the
+    subset owned by geo_code in the buildings overlay (one geo code per
+    building, as in the other modules). Buildings with missing or non-positive
     height are dropped from both, with a warning.
     """
     sfx = view_suffix(geo_code)
@@ -76,8 +77,9 @@ def _register_vis_buildings(sedona: SparkSession, geo_code: str, buffer: int) ->
 
     sedona.sql(
         f"""
-        SELECT b.* FROM vis_buildings_{sfx} b, geo_boundary_{sfx} g
-        WHERE ST_Intersects(b.geometry, g.geometry)
+        SELECT b.* FROM vis_buildings_{sfx} b
+        JOIN boundaries_buildings_overlay o ON b.building_id = o.building_id
+        WHERE o.{geo_level} = '{geo_code}'
         """
     ).createOrReplaceTempView(f"vis_observers_{sfx}")
 
@@ -90,7 +92,6 @@ def _register_vis_trees(
     geo_code: str,
     tree_area: int,
     tree_height: int,
-    tree_paths: list[Path] | None = None,
 ) -> DataFrame:
     """Load trees and register vis_trees_<sfx> keeping canopy polygons.
 
@@ -100,7 +101,7 @@ def _register_vis_trees(
     tree_height thresholds then apply (sub-threshold trees are not considered
     as obstacles either).
     """
-    geo_trees_gdf = load_trees_gdf(trees_dir, geo_boundary_gdf, cfg, tree_paths=tree_paths)
+    geo_trees_gdf = load_trees_gdf(trees_dir, geo_boundary_gdf, cfg)
 
     n_all = len(geo_trees_gdf)
     n_bad = int(geo_trees_gdf["tree_height"].isna().sum()) if "tree_height" in geo_trees_gdf.columns else 0
@@ -258,8 +259,6 @@ def process_geo_code(
     tree_height: int = 3,
     observer_mode: str = "facade",
     overwrite: bool = True,
-    # tile-mode optional args
-    overlapping_tiles_lst: list | None = None,
 ) -> pd.DataFrame | None:
     """Compute tree visibility from buildings for one geo_code.
 
@@ -284,20 +283,16 @@ def process_geo_code(
         return None
 
     try:
-        geo_boundary_gdf = gpd.GeoDataFrame(
+        # trees within `buffer` of edge buildings may sit in neighbouring tiles
+        search_gdf = gpd.GeoDataFrame(
             get_geometries(sedona, geo_level, geo_code, dissolve=True).toPandas(),
             geometry="geometry", crs=cfg.crs,
         )
-        _register_vis_buildings(sedona, geo_code, buffer)
-
-        trees_dir = Path(cfg.data.trees_dir)
-        tree_paths = None
-        if cfg.tile_system.enabled and overlapping_tiles_lst is not None:
-            # Tile-mode: pre-filter tile files by name substrings
-            tree_paths = [p for p in trees_dir.glob("*.gpkg") if any(t in p.name for t in overlapping_tiles_lst)]
+        search_gdf["geometry"] = search_gdf.buffer(buffer)
+        _register_vis_buildings(sedona, geo_level, geo_code, buffer)
 
         _register_vis_trees(
-            sedona, trees_dir, geo_boundary_gdf, cfg, geo_code, tree_area, tree_height, tree_paths=tree_paths
+            sedona, Path(cfg.data.trees_dir), search_gdf, cfg, geo_code, tree_area, tree_height
         )
 
         visible_df = compute_visibility(sedona, geo_code, buffer, observer_mode)

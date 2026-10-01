@@ -3,6 +3,7 @@ from pathlib import Path
 import time
 import numpy as np
 import pandas as pd
+import shapely
 import geopandas as gpd
 import xarray as xr
 import rioxarray as rxr
@@ -15,8 +16,7 @@ from .config.schema import GreenPyConfig
 from .utils.data_processing import (
     get_sub_geo_boundaries,
     find_overlapping_rasters,
-    find_overlapping_files,
-    rename_tree_columns,
+    load_trees_gdf,
     drop_geo_views,
 )
 
@@ -39,6 +39,8 @@ def binarise_tiles(chm_paths_lst: list, low_threshold: float, high_threshold: fl
         except Exception as e:
             logger.error(f"Error reading {file}: {e}")
 
+    if not chm_xr_lst:
+        raise FileNotFoundError("No readable CHM tiles overlap the boundary")
     merged_chm_xr = merge_arrays(chm_xr_lst)
     if target_crs is not None and merged_chm_xr.rio.crs is not None:
         from pyproj import CRS as ProjCRS
@@ -49,9 +51,12 @@ def binarise_tiles(chm_paths_lst: list, low_threshold: float, high_threshold: fl
 
 
 def get_canopy_cover_raster(subgeo_gdf: gpd.GeoDataFrame, binary_chm_xr: xr.DataArray) -> gpd.GeoDataFrame:
-    """Per-unit canopy cover (%) via zonal statistics on a binary CHM raster.
+    """Per-unit canopy cover (%) via zonal statistics on a canopy-fraction raster.
 
-    Nodata (NaN) pixels are excluded from both numerator and denominator;
+    Pixels hold canopy fraction in [0, 1]: 1/0 for a binarised CHM, or the
+    fraction of canopy sub-pixels for a coarsened GEE download. Cover is the
+    mean fraction over valid pixels (pixel centres inside the unit). Nodata
+    (NaN) pixels are excluded from both numerator and denominator;
     total_pixels is the number of valid pixels per unit.
     """
     logger.debug("Calculating canopy cover from raster")
@@ -60,12 +65,11 @@ def get_canopy_cover_raster(subgeo_gdf: gpd.GeoDataFrame, binary_chm_xr: xr.Data
         subgeo_gdf,
         binary_chm_xr[0].values,
         affine=binary_chm_xr.rio.transform(),
-        categorical=True,
+        stats=["sum", "count"],
         nodata=np.nan,
     )
-    # category keys may be ints or floats depending on the array dtype
-    canopy = [sum(v for k, v in z.items() if k == 1) if z else 0 for z in zs]
-    valid = [sum(z.values()) if z else 0 for z in zs]
+    canopy = [z["sum"] or 0 for z in zs]
+    valid = [z["count"] or 0 for z in zs]
     subgeo_gdf = subgeo_gdf.copy()
     subgeo_gdf["canopy_cover"] = [
         round(100 * c / t, 3) if t else np.nan for c, t in zip(canopy, valid)
@@ -76,32 +80,43 @@ def get_canopy_cover_raster(subgeo_gdf: gpd.GeoDataFrame, binary_chm_xr: xr.Data
 
 def get_canopy_cover_vector(subgeo_gdf: gpd.GeoDataFrame, trees_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
-    Vector-based canopy cover: sum of tree canopy area / census unit area.
-    Uses `tree_area` column when trees are points with a stored area; otherwise
-    computes from polygon geometry. `total_pixels` holds the unit area in m²
-    (1 m² ≈ one pixel) so the Merge step can area-weight its aggregation,
-    consistent with the raster path.
+    Vector-based canopy cover: canopy area inside each census unit / unit area.
+
+    Polygon crowns are clipped to each unit and unioned per unit, so a crown
+    straddling two units contributes only its own part to each, and
+    overlapping crowns are not double-counted. Point trees (no crown geometry)
+    fall back to their stored `tree_area`, credited to the unit containing the
+    point — their overlaps cannot be resolved. `total_pixels` holds the unit
+    area in m² (1 m² ≈ one pixel) so the Merge step can area-weight its
+    aggregation, consistent with the raster path.
     """
     logger.debug("Calculating canopy cover from tree vectors")
 
     subgeo_gdf = subgeo_gdf.copy()
     unit_areas = subgeo_gdf.geometry.area
-    tree_clip = gpd.clip(trees_gdf, subgeo_gdf)
+    units = subgeo_gdf[["geometry"]].reset_index(names="_idx")
+    trees_gdf = trees_gdf[trees_gdf.geometry.notna() & ~trees_gdf.geometry.is_empty]
 
-    if tree_clip.empty:
-        subgeo_gdf["canopy_cover"] = 0.0
-        subgeo_gdf["total_pixels"] = unit_areas.round().astype(int)
-        return subgeo_gdf
+    is_poly = trees_gdf.geometry.geom_type.isin(["Polygon", "MultiPolygon"])
+    canopy_area = pd.Series(0.0, index=subgeo_gdf.index)
 
-    tree_clip = tree_clip.copy()
-    if "tree_area" in tree_clip.columns:
-        tree_clip["clipped_area"] = tree_clip["tree_area"]
-    else:
-        tree_clip["clipped_area"] = tree_clip.geometry.area
-    tree_area_by_unit = tree_clip.sjoin(subgeo_gdf[["geometry"]].reset_index().rename(columns={"index": "_idx"}))
-    total_tree_area = tree_area_by_unit.groupby("_idx")["clipped_area"].sum()
+    crowns = trees_gdf.loc[is_poly, ["geometry"]]
+    if not crowns.empty:
+        pieces = gpd.overlay(crowns, units, how="intersection", keep_geom_type=True)
+        if not pieces.empty:
+            per_unit = pieces.groupby("_idx").geometry.agg(lambda g: shapely.union_all(g.values).area)
+            canopy_area = canopy_area.add(per_unit, fill_value=0)
 
-    subgeo_gdf["canopy_cover"] = (total_tree_area.reindex(subgeo_gdf.index).fillna(0) / unit_areas * 100).round(3)
+    points = trees_gdf.loc[~is_poly]
+    if not points.empty:
+        if "tree_area" not in points.columns:
+            raise ValueError(
+                "Non-polygon trees need a tree_area column (columns.tree_area_col) to compute canopy cover"
+            )
+        hits = gpd.sjoin(points[["tree_area", "geometry"]], units, predicate="within")
+        canopy_area = canopy_area.add(hits.groupby("_idx")["tree_area"].sum(), fill_value=0)
+
+    subgeo_gdf["canopy_cover"] = (canopy_area.reindex(subgeo_gdf.index).fillna(0) / unit_areas * 100).round(3)
     subgeo_gdf["total_pixels"] = unit_areas.round().astype(int)
     return subgeo_gdf
 
@@ -146,8 +161,8 @@ def process_geo_code(
             geo_canopy_cover_df = get_canopy_cover_raster(geo_boundary_gdf, binary_chm_xr)
 
         elif cfg.data.canopy_height_ee_path:
-            from .optional.canopy_gee import download_binary_canopy  # lazy: keeps ee/xee optional
-            cache = Path(cfg.output.base_dir) / "database" / "gee_canopy" / f"{geo_code}.tif"
+            from .optional.canopy_gee import download_binary_canopy, gee_cache_path  # lazy: keeps ee/xee optional
+            cache = gee_cache_path(cfg, geo_code, low_threshold, high_threshold, gee_scale)
             binary_chm_xr = download_binary_canopy(
                 geo_boundary_gdf, cfg, low_threshold, high_threshold,
                 scale=gee_scale, cache_path=cache, overwrite=overwrite,
@@ -155,17 +170,7 @@ def process_geo_code(
             geo_canopy_cover_df = get_canopy_cover_raster(geo_boundary_gdf, binary_chm_xr)
 
         elif cfg.data.trees_dir:
-            trees_dir = Path(cfg.data.trees_dir)
-            if trees_dir.is_file():
-                suffix = trees_dir.suffix.lower()
-                trees_gdf = gpd.read_parquet(trees_dir) if suffix in (".parquet", ".geoparquet") else gpd.read_file(trees_dir)
-                trees_gdf = trees_gdf.to_crs(cfg.crs) if trees_gdf.crs is not None else trees_gdf.set_crs(cfg.crs)
-            else:
-                tree_paths = find_overlapping_files(geo_boundary_gdf, trees_dir)
-                parts = [gpd.read_file(p) for p in tree_paths]
-                parts = [g.to_crs(cfg.crs) if g.crs is not None else g.set_crs(cfg.crs) for g in parts]
-                trees_gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=cfg.crs)
-            trees_gdf = rename_tree_columns(trees_gdf, cfg)
+            trees_gdf = load_trees_gdf(Path(cfg.data.trees_dir), geo_boundary_gdf, cfg)
             geo_canopy_cover_df = get_canopy_cover_vector(geo_boundary_gdf, trees_gdf)
 
         else:

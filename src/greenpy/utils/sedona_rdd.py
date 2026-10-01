@@ -34,17 +34,25 @@ def create_spatial_rdds(query_sdf: DataFrame, object_sdf: DataFrame, build_on_sp
     return query_rdd, object_rdd
 
 
-def count_trees_rdd(sedona: SparkSession, query_rdd: SpatialRDD, object_rdd: SpatialRDD, query_column: str, using_index: bool = True) -> DataFrame:
+def count_trees_rdd(
+    sedona: SparkSession, query_rdd: SpatialRDD, object_rdd: SpatialRDD, query_column: str,
+    using_index: bool = True, unique_objects: bool = False,
+) -> DataFrame:
     """Count object features (trees) intersecting each query feature via an RDD spatial join.
 
     Inner-join semantics: query features intersecting no trees are absent from
     the result (tree_count >= 1 for all returned rows); downstream consumers
-    fill missing counts with 0.
+    fill missing counts with 0. With unique_objects, each tree is credited to
+    a single query feature — for partitions such as census units, where a
+    tree point on a shared edge would otherwise count in both; the object
+    side's only attribute must then be its id.
     """
     logger.debug("Counting trees for each area using RDD")
 
     query_result = JoinQueryRaw.SpatialJoinQueryFlat(object_rdd, query_rdd, using_index, True)
     query_result_sdf = Adapter.toDf(query_result, [query_column], ["treeID"], sedona)
+    if unique_objects:
+        query_result_sdf = query_result_sdf.dropDuplicates(["treeID"])
 
     geo_tree_count_df = (
         query_result_sdf

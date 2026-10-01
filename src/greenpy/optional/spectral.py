@@ -28,20 +28,29 @@ def get_imagery(
     end_date: str,
     cloud_coverage: float,
     spectral_indexes: list[str],
+    composite: str = "max",
 ) -> "ee.Image":
-    """Build a cloud-filtered max-composite image of the requested spectral indices over the boundary."""
+    """Build a temporal composite image of the requested spectral indices over the boundary.
+
+    Scenes are filtered by scene-level CLOUDY_PIXEL_PERCENTAGE only (no
+    per-pixel cloud mask). Each index is composited independently per pixel
+    over the date range with `composite`: "max" (default; the greenest-pixel
+    style composite used by earlier greenpy results) or "median".
+    """
+    if composite not in ("max", "median"):
+        raise ValueError(f"composite must be 'max' or 'median', got {composite!r}")
     logger.debug("Querying GEE for imagery")
     union_geom = geo_level_filt_fc.union().geometry()
     import eemont  # noqa: F401 — registers .spectralIndices() on ee.ImageCollection
-    return (
+    collection = (
         ee.ImageCollection(imagery_ee_path)
         .filterDate(start_date, end_date)
         .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", cloud_coverage))
         .filterBounds(union_geom)
         .spectralIndices(spectral_indexes)
-        .max()
         .select(spectral_indexes)
     )
+    return collection.max() if composite == "max" else collection.median()
 
 
 def calculate_median_index(
@@ -71,8 +80,12 @@ def process_geo_code(
     output_dir: Path,
     gee_boundaries_asset: str,
     overwrite: bool = True,
+    composite: str = "max",
 ) -> pd.DataFrame | None:
-    """Compute median spectral indices per sub_geo_level unit within one geo_code via GEE.
+    """Compute spectral indices per sub_geo_level unit within one geo_code via GEE.
+
+    Each index is a temporal `composite` (max or median) over the date range,
+    then the spatial median of that composite over each unit.
 
     Writes `Spectral_<geo_code>.csv` with columns <sub_geo_level> plus one
     column per index in spectral_indexes. Returns the DataFrame, the cached
@@ -89,7 +102,7 @@ def process_geo_code(
         boundaries_fc = ee.FeatureCollection(gee_boundaries_asset)
         filt_fc = boundaries_fc.filter(ee.Filter.eq(geo_level, geo_code))
         sub_values = filt_fc.aggregate_array(sub_geo_level).distinct()
-        imagery_ic = get_imagery(filt_fc, imagery_ee_path, start_date, end_date, cloud_coverage, spectral_indexes)
+        imagery_ic = get_imagery(filt_fc, imagery_ee_path, start_date, end_date, cloud_coverage, spectral_indexes, composite)
 
         def dissolve_by_code(sub_code):
             code = ee.String(sub_code)

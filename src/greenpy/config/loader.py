@@ -92,6 +92,7 @@ def load_config(path: str | Path) -> GreenPyConfig:
         output=OutputPaths(base_dir=output_raw["base_dir"]),
         gee_project=raw.get("gee_project"),
         gee_boundaries_asset=raw.get("gee_boundaries_asset"),
+        park_min_area_ha=_parse_park_min_area(raw.get("park_min_area_ha")),
         dggs=dggs,
         dggs_resolution=dggs_resolution,
         tile_system=TileSystemConfig(
@@ -101,6 +102,14 @@ def load_config(path: str | Path) -> GreenPyConfig:
         osm=osm_cfg,
         open_buildings=open_buildings_cfg,
     )
+
+
+def _parse_park_min_area(value) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise ValueError(f"park_min_area_ha must be a non-negative number (hectares), got {value!r}")
+    return float(value)
 
 
 def _parse_dggs(raw: dict) -> tuple[str | None, int | None]:

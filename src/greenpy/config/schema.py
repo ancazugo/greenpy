@@ -113,6 +113,12 @@ class OutputPaths:
 
 @dataclass
 class TileSystemConfig:
+    """Legacy UK VOM tile settings, parsed so older configs still load.
+
+    Tree and CHM tile directories are always searched by file extent, so these
+    no longer change which tiles are read.
+    """
+
     enabled: bool = False
     tile_name_pattern: str | None = None
 
@@ -126,6 +132,9 @@ class GreenPyConfig:
     output: OutputPaths
     gee_project: str | None = None
     gee_boundaries_asset: str | None = None
+    # Drop parks smaller than this (hectares) before T300; None keeps all.
+    # The WHO guideline behind the 300 rule uses green spaces of >= 0.5-1 ha.
+    park_min_area_ha: float | None = None
     # Aggregate to DGGS cells instead of the finest geo level
     dggs: str | None = None  # h3, s2, geohash, a5 or rhealpix
     dggs_resolution: int | None = None

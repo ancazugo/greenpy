@@ -85,8 +85,32 @@ def _derive_road_nodes(edges_gdf: gpd.GeoDataFrame) -> tuple[gpd.GeoDataFrame, g
     return edges_gdf, nodes_gdf
 
 
+def _ensure_edge_lengths(edges_gdf: gpd.GeoDataFrame, source_col: str) -> gpd.GeoDataFrame:
+    """Guarantee a numeric road_edge_length (metres), T300's Dijkstra weight.
+
+    Without it networkx silently weights every edge as 1, turning distances
+    into hop counts, so missing lengths are computed from the edge geometry
+    (in the projected config CRS) with a warning.
+    """
+    edges_gdf = edges_gdf.copy()
+    if "road_edge_length" in edges_gdf.columns:
+        edges_gdf["road_edge_length"] = pd.to_numeric(edges_gdf["road_edge_length"], errors="coerce")
+        missing = edges_gdf["road_edge_length"].isna()
+        if not missing.any():
+            return edges_gdf
+        logger.warning(f"{int(missing.sum())} road edges have no valid length — computing it from their geometry")
+        edges_gdf.loc[missing, "road_edge_length"] = edges_gdf.geometry[missing].length
+    else:
+        logger.warning(
+            f"Road edges have no '{source_col}' column (columns.road_edge_length) — "
+            "computing edge lengths from geometry"
+        )
+        edges_gdf["road_edge_length"] = edges_gdf.geometry.length
+    return edges_gdf
+
+
 def _coerce_null_columns(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Cast fully-null columns to string so Spark 4.x can infer their types."""
+    """Cast fully-null columns to string so Spark can infer their types."""
     for col in gdf.columns:
         if gdf[col].isna().all():
             gdf = gdf.copy()
@@ -240,6 +264,7 @@ def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
         else:
             logger.info("No road nodes file — deriving nodes from edge endpoints")
             road_edges_gdf, road_nodes_gdf = _derive_road_nodes(road_edges_gdf)
+        road_edges_gdf = _ensure_edge_lengths(road_edges_gdf, col.road_edge_length)
 
     road_edges_gdf.to_parquet(db_dir / "road_edges.parquet", index=False)
     road_nodes_gdf.to_parquet(db_dir / "road_nodes.parquet", index=False)
@@ -262,12 +287,14 @@ def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
 def _build_overlay(buildings_gdf: gpd.GeoDataFrame, boundaries_gdf: gpd.GeoDataFrame, code_cols: list[str], out_path: Path) -> None:
     """Write a building_id → boundary-codes lookup parquet.
 
-    Used by the Merge step as the `boundaries_buildings_overlay` view. Buildings
-    are reduced to representative points so each maps to exactly one unit.
+    Used as the `boundaries_buildings_overlay` view, which decides the one unit
+    each building belongs to. Buildings are reduced to representative points;
+    `intersects` (not `within`) keeps points lying exactly on a shared unit
+    boundary, which then go to the first matching unit.
     """
     points_gdf = buildings_gdf[["building_id", "geometry"]].copy()
     points_gdf["geometry"] = points_gdf.representative_point()
-    overlay_gdf = gpd.sjoin(points_gdf, boundaries_gdf[code_cols + ["geometry"]], how="inner", predicate="within")
+    overlay_gdf = gpd.sjoin(points_gdf, boundaries_gdf[code_cols + ["geometry"]], how="inner", predicate="intersects")
     overlay_df = pd.DataFrame(overlay_gdf[["building_id"] + code_cols]).drop_duplicates(subset="building_id")
     overlay_df.to_parquet(out_path, index=False)
 
@@ -340,12 +367,21 @@ def _filter_buildings(buildings_gdf: gpd.GeoDataFrame, cfg: GreenPyConfig) -> gp
 
 
 def _filter_parks(parks_sites_gdf: gpd.GeoDataFrame, cfg: GreenPyConfig) -> gpd.GeoDataFrame:
-    """Filter park sites by function if configured; otherwise use all features."""
+    """Filter park sites by function and minimum area if configured; otherwise use all features.
+
+    park_min_area_ha drops parks smaller than the threshold (area in the
+    projected config CRS), e.g. 0.5–1 ha for the WHO green-space guideline
+    behind the 300 rule.
+    """
     col = cfg.columns
     if col.park_function_col and col.park_function_value:
         func_col = col.park_function_col
         func_val = col.park_function_value
-        return parks_sites_gdf[parks_sites_gdf[func_col] == func_val].reset_index(drop=True)
+        parks_sites_gdf = parks_sites_gdf[parks_sites_gdf[func_col] == func_val]
+    if cfg.park_min_area_ha:
+        n_before = len(parks_sites_gdf)
+        parks_sites_gdf = parks_sites_gdf[parks_sites_gdf.geometry.area >= cfg.park_min_area_ha * 10_000]
+        logger.info(f"Filtered parks to >= {cfg.park_min_area_ha} ha: {n_before} → {len(parks_sites_gdf)}")
     return parks_sites_gdf.reset_index(drop=True)
 
 
@@ -353,4 +389,9 @@ def _filter_park_access(parks_access_gdf: gpd.GeoDataFrame, parks_sites_gdf: gpd
     """Filter park access points to those linked to filtered park sites."""
     if "park_access_ref" in parks_access_gdf.columns:
         return parks_access_gdf[parks_access_gdf["park_access_ref"].isin(parks_sites_gdf["park_id"])].reset_index(drop=True)
+    if cfg.park_min_area_ha or cfg.columns.park_function_col:
+        logger.warning(
+            "Park access points have no park_access_ref link (columns.park_access_ref_col) — "
+            "they cannot be filtered to the selected parks, so network distances may reach excluded parks"
+        )
     return parks_access_gdf.reset_index(drop=True)

@@ -1,8 +1,11 @@
 """
 Canopy cover from a Google Earth Engine canopy-height dataset (optional module).
 
-Binarisation (height within [low, high]) runs server-side in GEE; the binary
-mask is pulled down with xee as an xarray array and then flows through the same
+Binarisation (height within [low, high]) runs server-side in GEE at the
+dataset's native resolution; when a coarser download scale is requested the
+mask is averaged (reduceResolution) into canopy *fraction* per output pixel, so
+cover stays unbiased instead of thresholding GEE's height pyramids. The result
+is pulled down with xee as an xarray array and flows through the same
 zonal-statistics path as local CHM tiles (t30.get_canopy_cover_raster).
 
 Designed for the global 1 m Meta/WRI dataset
@@ -34,6 +37,12 @@ def _ensure_gee(project: str | None) -> None:
         _GEE_READY = True
 
 
+def gee_cache_path(cfg: GreenPyConfig, name: str, low_threshold: float, high_threshold: float, scale: float) -> Path:
+    """Cache location for a downloaded canopy raster, keyed by every parameter that changes its pixels."""
+    tag = f"{name}_h{low_threshold:g}-{high_threshold:g}_s{scale:g}m"
+    return Path(cfg.output.base_dir) / "database" / "gee_canopy" / f"{tag}.tif"
+
+
 def download_binary_canopy(
     geo_boundary_gdf: gpd.GeoDataFrame,
     cfg: GreenPyConfig,
@@ -43,13 +52,15 @@ def download_binary_canopy(
     cache_path: Path | None = None,
     overwrite: bool = True,
 ) -> xr.DataArray:
-    """Download a server-side binarised canopy mask for the boundary as a (band, y, x) DataArray.
+    """Download a server-side canopy mask for the boundary as a (band, y, x) DataArray.
 
-    Canopy pixels (height in [low_threshold, high_threshold]) are 1, other
-    mapped pixels 0, and unmapped pixels NaN — matching the shape and nodata
-    semantics of t30.binarise_tiles so get_canopy_cover_raster works unchanged.
-    When cache_path is given the array is cached as GeoTIFF and reused if
-    overwrite is False.
+    At the dataset's native scale, canopy pixels (height in [low_threshold,
+    high_threshold]) are 1 and other mapped pixels 0; at a coarser `scale`
+    each pixel holds the canopy fraction of the native pixels it covers.
+    Unmapped pixels are NaN — matching the nodata semantics of
+    t30.binarise_tiles so get_canopy_cover_raster works unchanged. When
+    cache_path is given the array is cached as GeoTIFF and reused if
+    overwrite is False (use gee_cache_path so the name encodes the settings).
     """
     if cache_path is not None and cache_path.exists() and not overwrite:
         logger.debug(f"Using cached GEE canopy raster {cache_path}")
@@ -65,7 +76,11 @@ def download_binary_canopy(
     height = max(1, math.ceil((maxy - miny) / scale))
     transform = affine.Affine(scale, 0.0, minx, 0.0, -scale, maxy)
 
-    img = ee.ImageCollection(cfg.data.canopy_height_ee_path).mosaic()
+    collection = ee.ImageCollection(cfg.data.canopy_height_ee_path)
+    # mosaic() drops the source projection; pin it back so the threshold is
+    # evaluated on native pixels rather than on GEE's averaged height pyramids
+    native = collection.first().projection()
+    img = collection.mosaic().setDefaultProjection(native)
     # toFloat() so masked pixels (filled with xee's int32 sentinel) become NaN cleanly
     binary = (
         img.gte(low_threshold)
@@ -73,6 +88,11 @@ def download_binary_canopy(
         .toFloat()
         .rename("canopy")
     )
+    native_scale = native.nominalScale().getInfo()
+    if scale > native_scale * 1.01:
+        # canopy fraction of the native pixels inside each output pixel
+        logger.info(f"Aggregating {native_scale:.2f} m canopy mask to {scale} m canopy fraction")
+        binary = binary.reduceResolution(ee.Reducer.mean(), maxPixels=65535)
 
     ds = xr.open_dataset(
         ee.ImageCollection([binary]),

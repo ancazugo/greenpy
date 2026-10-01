@@ -55,30 +55,26 @@ def load_trees_gdf(
     trees_dir: Path,
     geo_boundary_gdf: gpd.GeoDataFrame,
     cfg,
-    tree_paths: list[Path] | None = None,
 ) -> gpd.GeoDataFrame:
     """Read tree vector files for a boundary into one GeoDataFrame in cfg.crs.
 
-    Reads either a single tree file, an explicit list of tile paths, or the
-    files in trees_dir overlapping the boundary. Columns are renamed to the
-    canonical tree_height/tree_area/tree_id names; original geometries are kept.
+    Reads either a single tree file or the files in trees_dir whose extent
+    overlaps the boundary. Callers that look beyond the boundary (e.g. building
+    buffers) must pass the boundary buffered accordingly, or trees in
+    neighbouring tiles are missed. Columns are renamed to the canonical
+    tree_height/tree_area/tree_id names; original geometries are kept.
     """
-    if tree_paths is not None:
-        parts = [gpd.read_file(p) for p in tree_paths]
-        trees_gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True))
-    elif trees_dir.is_file():
+    if trees_dir.is_file():
         suffix = trees_dir.suffix.lower()
         trees_gdf = gpd.read_parquet(trees_dir) if suffix in (".parquet", ".geoparquet") else gpd.read_file(trees_dir)
-    elif cfg.tile_system.enabled:
-        paths = list(trees_dir.glob("*.gpkg"))
-        logger.debug(f"Found {len(paths)} tree tile files")
-        parts = [gpd.read_file(p) for p in paths]
-        trees_gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True))
     else:
         paths = find_overlapping_files(geo_boundary_gdf, trees_dir, pattern="*.gpkg")
         logger.debug(f"Found {len(paths)} tree vector files")
+        if not paths:
+            raise FileNotFoundError(f"No tree .gpkg files in {trees_dir} overlap the boundary")
         parts = [gpd.read_file(p) for p in paths]
-        trees_gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True))
+        parts = [g.to_crs(cfg.crs) if g.crs is not None else g.set_crs(cfg.crs) for g in parts]
+        trees_gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=cfg.crs)
 
     trees_gdf = rename_tree_columns(trees_gdf, cfg)
     return trees_gdf.to_crs(cfg.crs) if trees_gdf.crs is not None else trees_gdf.set_crs(cfg.crs)
@@ -116,9 +112,13 @@ def find_overlapping_files(boundary_gdf: gpd.GeoDataFrame, files_dir: Path, patt
 
 
 def find_overlapping_rasters(boundary_gdf: gpd.GeoDataFrame, files_dir: Path, pattern: str = "*.tif") -> list[Path]:
-    """Returns raster paths from files_dir whose bounding box intersects boundary_gdf."""
+    """Returns raster paths under files_dir (searched recursively) whose bounding box intersects boundary_gdf.
+
+    Tile bounds are transformed to the boundary CRS before the test, so tiles
+    stored in another CRS are still selected correctly.
+    """
     import rioxarray as rxr
-    files = list(files_dir.glob(pattern))
+    files = sorted(files_dir.rglob(pattern))
     if not files:
         return []
 
@@ -128,7 +128,10 @@ def find_overlapping_rasters(boundary_gdf: gpd.GeoDataFrame, files_dir: Path, pa
     for p in files:
         try:
             rast = rxr.open_rasterio(p)
-            bounds = rast.rio.bounds()
+            if rast.rio.crs is not None and boundary_gdf.crs is not None:
+                bounds = rast.rio.transform_bounds(boundary_gdf.crs)
+            else:
+                bounds = rast.rio.bounds()
             bbox_geom = box(*bounds)
             if bbox_geom.intersects(dissolved):
                 result.append(p)
@@ -145,20 +148,30 @@ def filter_buffer_geometries(
     buffer: int | None = None,
     id_col: str = "building_id",
 ) -> DataFrame:
-    """Filter table_name features intersecting the geo_code boundary, optionally buffered.
+    """Filter table_name features belonging to the geo_code, optionally buffered.
 
-    Requires the `geo_boundary_<geo_code>` view created by get_geometries() or
+    Buildings are selected through the `boundaries_buildings_overlay` lookup
+    (representative point in the unit), so a building straddling two geo codes
+    is processed — and output — by exactly one of them, the same unit Merge
+    aggregates it into. Other tables are selected by intersection with the
+    `geo_boundary_<geo_code>` view created by get_geometries() or
     get_sub_geo_boundaries(). Registers `geo_<table_name>_<geo_code>` and, when a
     buffer is given, `<table_name>_buffers_<geo_code>` (geometry buffered by
     `buffer` metres plus id_col).
     """
     sfx = view_suffix(geo_code)
-    geo_sdf = sedona.sql(
-        f"""
+    if table_name == "buildings":
+        query = f"""
+        SELECT b.* FROM buildings b
+        JOIN boundaries_buildings_overlay o ON b.building_id = o.building_id
+        WHERE o.{geo_level} = '{geo_code}'
+        """
+    else:
+        query = f"""
         SELECT b.* FROM {table_name} b, geo_boundary_{sfx} g
         WHERE ST_Intersects(b.geometry, g.geometry)
         """
-    )
+    geo_sdf = sedona.sql(query)
     geo_sdf.createOrReplaceTempView(f"geo_{table_name}_{sfx}")
 
     if buffer:

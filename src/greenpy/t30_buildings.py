@@ -85,7 +85,9 @@ def get_canopy_cover_buildings_raster(
     raster_sdf.createOrReplaceTempView(f"raw_tiles_{sfx}")
 
     # Tile-explode large rasters into 512×512 chunks, then binarise in-SQL:
-    # pixels with CHM height in [low_threshold, high_threshold] → 1.0 (tree), else → 0.0
+    # pixels with CHM height in [low_threshold, high_threshold] → 1.0 (tree), else → 0.0.
+    # RS_MapAlgebra's output carries no nodata, so CHM nodata pixels become 0.0
+    # there; the raw tile is kept alongside to count only valid pixels.
     tile_expr = (
         "tile"
         if already_binary
@@ -95,7 +97,7 @@ def get_canopy_cover_buildings_raster(
         )
     )
     binary_sdf = sedona.sql(f"""
-        SELECT {tile_expr} AS tile
+        SELECT {tile_expr} AS tile, tile AS raw_tile
         FROM (
             SELECT RS_TileExplode(raster, 512, 512) AS (x_idx, y_idx, tile)
             FROM raw_tiles_{sfx}
@@ -125,12 +127,14 @@ def get_canopy_cover_buildings_raster(
     )
     buildings_partitioned_sdf.createOrReplaceTempView(f"buildings_partitioned_{sfx}")
 
-    # On the binary raster: 'sum' = tree pixels (1.0 values), 'count' = all valid pixels.
+    # 'sum' on the binary raster = tree pixels (canopy fraction for coarsened GEE
+    # masks); 'count' on the raw raster = valid (non-nodata) pixels. allTouched
+    # is true: every pixel touching the buffer counts, unlike T30's pixel-centre rule.
     result_sdf = sedona.sql(f"""
         SELECT
             b.building_id,
-            SUM(RS_ZonalStats(bt.tile, b.geometry, 1, 'sum',   true)) AS tree_pixels,
-            SUM(RS_ZonalStats(bt.tile, b.geometry, 1, 'count', true)) AS total_pixels
+            SUM(RS_ZonalStats(bt.tile,     b.geometry, 1, 'sum',   true)) AS tree_pixels,
+            SUM(RS_ZonalStats(bt.raw_tile, b.geometry, 1, 'count', true)) AS total_pixels
         FROM buildings_partitioned_{sfx} b, binary_tiles_{sfx} bt
         WHERE RS_Intersects(bt.tile, b.geometry)
         GROUP BY b.building_id
@@ -154,9 +158,10 @@ def get_canopy_cover_buildings_vector(
 ) -> pd.DataFrame:
     """Per-building canopy cover (%) from tree vectors via a Sedona spatial join.
 
-    For polygon trees the clipped intersection area is used; for points with a
-    stored `tree_area` the whole tree area counts (mirroring
-    t30.get_canopy_cover_vector, so overlapping canopies can exceed 100%).
+    For polygon trees the area of the union of crowns clipped to the buffer is
+    used, so overlapping crowns are not double-counted (mirroring
+    t30.get_canopy_cover_vector); for points with a stored `tree_area` the
+    whole tree area counts, so overlapping point canopies can exceed 100%.
     `total_pixels` holds the buffer area in m² (1 m² ≈ one pixel) for
     consistency with the raster path. Buildings with no trees get 0.
     """
@@ -172,12 +177,13 @@ def get_canopy_cover_buildings_vector(
     sedona.createDataFrame(trees_gdf[cols]).createOrReplaceTempView(f"t30b_trees_{sfx}")
 
     canopy_expr = (
-        "ST_Area(ST_Intersection(t.geometry, b.geometry))" if polygonal else "t.tree_area"
+        "ST_Area(ST_Intersection(FIRST(b.geometry), ST_Union_Aggr(t.geometry)))"
+        if polygonal else "SUM(t.tree_area)"
     )
     result_df = sedona.sql(f"""
         SELECT
             b.building_id,
-            ROUND(SUM(COALESCE({canopy_expr}, 0)), 3) AS tree_pixels,
+            ROUND(COALESCE({canopy_expr}, 0), 3) AS tree_pixels,
             ROUND(MAX(ST_Area(b.geometry))) AS total_pixels
         FROM buildings_buffers_{sfx} b
         LEFT JOIN t30b_trees_{sfx} t ON ST_Intersects(b.geometry, t.geometry)
@@ -248,10 +254,9 @@ def process_geo_code(
             )
 
         elif cfg.data.canopy_height_ee_path:
-            from .optional.canopy_gee import download_binary_canopy  # lazy: keeps ee/xee optional
-            # buffer-suffixed cache: T30's gee_canopy/<geo_code>.tif only covers
-            # the unbuffered boundary bounds
-            cache = Path(cfg.output.base_dir) / "database" / "gee_canopy" / f"{geo_code}_b{buffer}m.tif"
+            from .optional.canopy_gee import download_binary_canopy, gee_cache_path  # lazy: keeps ee/xee optional
+            # buffer-suffixed cache: T30's raster only covers the unbuffered boundary bounds
+            cache = gee_cache_path(cfg, f"{geo_code}_b{buffer}m", low_threshold, high_threshold, gee_scale)
             download_binary_canopy(
                 search_gdf, cfg, low_threshold, high_threshold,
                 scale=gee_scale, cache_path=cache, overwrite=overwrite,
