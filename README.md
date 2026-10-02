@@ -14,6 +14,7 @@ greenpy computes each metric per building and per census unit from standard geos
 
 | Process | What it computes | Output (one CSV per geo code) |
 |---|---|---|
+| `Trees` | Segments individual tree crowns from a canopy height model (local CHM tiles or the global Meta/WRI 1 m CHM) into `data.trees_dir`, for T3/Tree_count/Visibility | `trees_<geo_code>.parquet`: `treeID`, `height`, `area`, `top_x`, `top_y`, crown geometry |
 | `T3` | Trees (height and area strictly above `--tree_height`/`--tree_area`) whose centroid lies within `--buffer` metres of each building | `building_id`, `tree_count_<buffer>m`, sub-geo code |
 | `T30` | Canopy cover % per sub-geo unit, from CHM raster tiles, a GEE canopy-height asset, or tree polygons | sub-geo code, `canopy_cover`, `total_pixels` |
 | `T30_buildings` | Canopy cover % within `--buffer` metres of each building (distributed Sedona `RS_ZonalStats` for raster sources), same canopy sources as T30 | `building_id`, `tree_pixels`, `total_pixels`, `canopy_cover` |
@@ -95,7 +96,7 @@ The core 3-30-300 pipeline (T3, T30, T300, Tree_count, Visibility, Merge) with l
 All inputs are vector files readable by GeoPandas (GeoPackage, Shapefile, GeoJSON, (Geo)Parquet…):
 
 - **Buildings** — footprint polygons with a unique id column. Instead of a file, `data.buildings` also accepts `osm` (OpenStreetMap; no heights), `overture` (Overture Maps, global; `height` feeds `building_height` but is sparse outside major cities), or `open_buildings` (Google Open Buildings v3 via GEE, needs `gee_project`; no heights, and covers Africa, South/Southeast Asia and Latin America & the Caribbean only — **not** Europe or North America)
-- **Trees** — canopy polygons with height and area attributes (a single file or a directory of tiles)
+- **Trees** — canopy polygons with height and area attributes (a single file or a directory of tiles), or segment them from a CHM with the `Trees` process (see *Tree segmentation* below)
 - **Canopy for T30** — one of: a directory of CHM raster tiles (`.tif`, `chm_tiles_dir`); a GEE canopy-height asset (`canopy_height_ee_path`, needs `gee_project`); or the tree polygons above. See *Canopy cover source* below
 - **Parks** — green-space polygons, plus access points (can be the same file). Set `park_min_area_ha` (top-level config key) to ignore small green spaces — the WHO guideline behind the 300 rule uses ≥ 0.5–1 ha. Access points are only filtered along with their parks when `columns.park_access_ref_col` links them
 - **Roads** — edges (and optionally nodes; nodes are derived from edge endpoints if absent). File-based networks must be **noded** (split at every intersection — nodes are derived from segment endpoints only) and reduced to their **largest connected component**, or buildings snapping to isolated fragments get null network distances. `columns.road_edge_length` should hold edge lengths in metres; if the column is missing, lengths are computed from the geometry in the config CRS (with a warning)
@@ -134,6 +135,7 @@ output:
 Run one module at a time; `Merge` last:
 
 ```bash
+greenpy run -c config.yaml -p Trees      # optional: segment trees from a CHM into trees_dir
 greenpy run -c config.yaml -p T3 --buffer 100
 greenpy run -c config.yaml -p T30
 greenpy run -c config.yaml -p T30_buildings --buffer 100
@@ -175,7 +177,33 @@ T30 and T30_buildings pick their canopy source by what's configured, in priority
    Downloaded rasters are cached under `<base_dir>/database/gee_canopy/`, named by geo code, height band and scale. At the native 1 m scale large regions can be slow — use `--gee_scale 10` to trade detail for speed: the mask is binarised at the native 1 m and averaged to canopy fraction per 10 m pixel server-side, so cover estimates stay consistent with 1 m runs.
 3. **Tree polygons** (`trees_dir`) — canopy cover as the area of the union of crowns clipped to each unit / unit area (a crown straddling two units counts only its own part in each; overlapping crowns are not double-counted); used when no raster or GEE source is set. Point trees fall back to their `tree_area` attribute.
 
-Where T30 reports canopy per sub-geo unit, `T30_buildings` reports it per building, within `--buffer` metres of each footprint (`--buffer 0` for the footprint alone). Raster sources run distributed through Sedona (`RS_TileExplode` + `RS_ZonalStats`), so large CHM tile sets scale across Spark workers; the vector source uses an `ST_Intersection` area ratio. CHM nodata pixels are excluded from `total_pixels` in both modules. Two differences to keep in mind: raster tiles must not overlap (pixel counts are summed across tiles), and T30_buildings counts every pixel *touching* a buffer while T30 counts pixels whose *centre* falls in the unit. CHM tiles are searched recursively under `chm_tiles_dir`. In `Merge`, per-building canopy is averaged up to the geo level as `building_canopy_cover_<buffer>m` (included automatically when T30_buildings output exists).
+Where T30 reports canopy per sub-geo unit, `T30_buildings` reports it per building, within `--buffer` metres of each footprint (`--buffer 0` for the footprint alone). Raster sources run distributed through Sedona (`RS_TileExplode` + `RS_ZonalStats`), so large CHM tile sets scale across Spark workers; the vector source uses an `ST_Intersection` area ratio. CHM nodata pixels are excluded from `total_pixels` in both modules. Where CHM tiles overlap (e.g. several survey years), `data.chm_overlap` decides which heights are used — `latest` (default; the last path in sorted order, i.e. the latest year for `<dir>/<year>/` layouts) or `max` (per-pixel maximum) — in T30, T30_buildings and Trees alike; T30_buildings first composites overlapping tiles into non-overlapping chunks under the CHM cache, since it sums pixel counts per tile. One difference to keep in mind: T30_buildings counts every pixel *touching* a buffer while T30 counts pixels whose *centre* falls in the unit. CHM tiles are searched recursively under `chm_tiles_dir`, matching `data.chm_pattern` (default `*.tif`); Defra VOM hillshades (`VOM_HS_*`, stored beside every height tile) are always skipped. In `Merge`, per-building canopy is averaged up to the geo level as `building_canopy_cover_<buffer>m` (included automatically when T30_buildings output exists).
+
+### Tree segmentation (Trees)
+
+`Trees` derives the crowns T3 counts from a canopy height model, so the "3" can be measured anywhere a CHM exists:
+
+```bash
+greenpy run -c config.yaml -p Trees --parallel --n_workers 32   # writes data.trees_dir/trees_<geo_code>.parquet
+greenpy run -c config.yaml -p T3 --buffer 50
+```
+
+The CHM is smoothed, treetops are found with a height-dependent circular local-maximum window, and crowns are grown from them with Dalponte & Coomes (2016) region growing — a numpy/scipy port of the lidR pipeline used for the Defra VOM trees (`preset: legacy_vom` reproduces it: ~99.7 % of crowns match lidR one-to-one, at ~6× lidR's speed on one core). Large areas are processed in blocks with a halo, in parallel; a tree belongs to the block and geo code containing its treetop, so blocks and neighbouring geo codes never duplicate or cut trees.
+
+Sources (`tree_segmentation.source`): `chm_tiles` mosaics the tiles under `data.chm_tiles_dir` — where tiles overlap, e.g. several survey years, `data.chm_overlap: latest` keeps the last path in sorted order (the latest year for `<dir>/<year>/` layouts) and `max` takes the per-pixel maximum across them, so a tree seen in any survey counts (in London, Defra's December 2020 VOM shows canopy at 36–49 % of surveyed street trees vs 49–77 % in 2018; `max` raised the share of inventory trees visible in the CHM from 52 % to 77 %); `meta` downloads the [Meta/WRI global canopy height](https://registry.opendata.aws/dataforgood-fb-forests/) tiles covering the area from AWS (~240 MB per zoom-9 tile, cached) and segments them on their native grid, with lengths converted to ground metres.
+
+Presets (`tree_segmentation.preset`, individual values overridable under `params`) were tuned with `scripts/tune_tree_segmentation.py`, scoring only trees T3 would count (crown > 10 m², height > 3 m) against the London borough tree inventory (recall on surveyed trees visible in the CHM; precision inside surveyed crowns, since council inventories omit private trees) and NeonTreeEvaluation (full precision/recall), with London boroughs split into tuning and held-out sets. Held-out results:
+
+| Preset | CHM | London F1 | London recall | NEON precision / recall |
+|---|---|---|---|---|
+| `legacy_vom` | Defra VOM (`chm_overlap: max`) | 0.48 | 0.32 | 0.84 / 0.19 |
+| `vom` | Defra VOM (`chm_overlap: max`) | 0.58 | 0.46 | 0.87 / 0.46 |
+| `legacy_vom` | Meta | 0.41 | 0.33 | — |
+| `meta` | Meta | 0.48 | 0.43 | — |
+
+On an independent check — Cambridge City Council's 2024 inventory (20,779 trees, not used in tuning; `scripts/evaluate_trees_survey.py`) — `vom` raised the share of surveyed trees matched within 3 m from 34 % to 46 % (F1 0.56 → 0.68), while `meta` matched 23 %, little better than `legacy_vom` on Meta: the gain on Meta did not transfer beyond London.
+
+Meta's smoother, whole-metre heights still split about one surveyed crown in two, so expect its T3 counts to run higher than LiDAR's (over Cambridge: 147k vs 120k T3-eligible trees with the tuned presets).
 
 ### Tree visibility (Visibility, optional)
 

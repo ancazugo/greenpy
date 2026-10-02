@@ -58,26 +58,39 @@ def load_trees_gdf(
 ) -> gpd.GeoDataFrame:
     """Read tree vector files for a boundary into one GeoDataFrame in cfg.crs.
 
-    Reads either a single tree file or the files in trees_dir whose extent
-    overlaps the boundary. Callers that look beyond the boundary (e.g. building
-    buffers) must pass the boundary buffered accordingly, or trees in
-    neighbouring tiles are missed. Columns are renamed to the canonical
-    tree_height/tree_area/tree_id names; original geometries are kept.
+    Reads either a single tree file or the .gpkg/.parquet files in trees_dir
+    (e.g. written by the Trees process) whose extent overlaps the boundary.
+    Callers that look beyond the boundary (e.g. building buffers) must pass
+    the boundary buffered accordingly, or trees in neighbouring tiles are
+    missed. Columns are renamed to the canonical tree_height/tree_area/tree_id
+    names; original geometries are kept.
     """
     if trees_dir.is_file():
         suffix = trees_dir.suffix.lower()
         trees_gdf = gpd.read_parquet(trees_dir) if suffix in (".parquet", ".geoparquet") else gpd.read_file(trees_dir)
     else:
         paths = find_overlapping_files(geo_boundary_gdf, trees_dir, pattern="*.gpkg")
+        paths += find_overlapping_files(geo_boundary_gdf, trees_dir, pattern="*.parquet")
         logger.debug(f"Found {len(paths)} tree vector files")
         if not paths:
-            raise FileNotFoundError(f"No tree .gpkg files in {trees_dir} overlap the boundary")
-        parts = [gpd.read_file(p) for p in paths]
+            raise FileNotFoundError(f"No tree .gpkg/.parquet files in {trees_dir} overlap the boundary")
+        parts = [gpd.read_parquet(p) if p.suffix == ".parquet" else gpd.read_file(p) for p in paths]
         parts = [g.to_crs(cfg.crs) if g.crs is not None else g.set_crs(cfg.crs) for g in parts]
         trees_gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=cfg.crs)
 
     trees_gdf = rename_tree_columns(trees_gdf, cfg)
     return trees_gdf.to_crs(cfg.crs) if trees_gdf.crs is not None else trees_gdf.set_crs(cfg.crs)
+
+
+def _vector_bounds(path: Path) -> tuple:
+    """File extent without reading features: GeoParquet bbox metadata, or the OGR layer extent."""
+    if path.suffix == ".parquet":
+        import json
+        import pyarrow.parquet as pq
+        geo = json.loads(pq.read_schema(path).metadata[b"geo"])
+        bbox = geo["columns"][geo["primary_column"]].get("bbox")
+        return tuple(bbox) if bbox else tuple(gpd.read_parquet(path).total_bounds)
+    return tuple(gpd.read_file(path, rows=0).total_bounds)  # fast: reads no features
 
 
 def find_overlapping_files(boundary_gdf: gpd.GeoDataFrame, files_dir: Path, pattern: str = "*.gpkg") -> list[Path]:
@@ -92,7 +105,7 @@ def find_overlapping_files(boundary_gdf: gpd.GeoDataFrame, files_dir: Path, patt
     extents = []
     for p in files:
         try:
-            bbox = gpd.read_file(p, rows=0).total_bounds  # fast: reads no features
+            bbox = _vector_bounds(p)
             extents.append({"path": p, "minx": bbox[0], "miny": bbox[1], "maxx": bbox[2], "maxy": bbox[3]})
         except Exception as e:
             logger.warning(f"Could not read extent of {p}: {e}")

@@ -53,7 +53,7 @@ def _run_process(process: str, args_dict: dict, geo_code: str) -> object:
 @app.command()
 def run(
     config: Path = typer.Option(..., "--config", "-c", help="Path to study-area YAML config file"),
-    process: str = typer.Option(..., "--process", "-p", help="Module to run: T3, T30, T30_buildings, T300, Tree_count, Visibility, Spectral, Merge"),
+    process: str = typer.Option(..., "--process", "-p", help="Module to run: Trees, T3, T30, T30_buildings, T300, Tree_count, Visibility, Spectral, Merge"),
     geo_level: str = typer.Option(None, "--geo_level", help="Geography column to process (must be in config.columns.geo_levels)"),
     sub_geo_level: str = typer.Option(None, "--sub_geo_level", help="Sub-geography column results are reported at (default: finest level in config.columns.geo_levels)"),
     dggs: Optional[str] = typer.Option(None, "--dggs", help="Aggregate to DGGS cells instead of the finest census level: h3, s2, geohash, a5 or rhealpix; overrides config"),
@@ -96,7 +96,7 @@ def run(
     cfg = load_config(config)
     geo_levels = cfg.columns.geo_levels
 
-    valid_processes = {"T3", "T30", "T30_buildings", "T300", "Tree_count", "Visibility", "Spectral", "Merge"}
+    valid_processes = {"Trees", "T3", "T30", "T30_buildings", "T300", "Tree_count", "Visibility", "Spectral", "Merge"}
     if process not in valid_processes:
         typer.echo(f"Error: --process must be one of {sorted(valid_processes)}", err=True)
         raise typer.Exit(1)
@@ -172,6 +172,10 @@ def run(
         )
         return
 
+    if process == "Trees":
+        _run_trees(cfg, geo_level or geo_levels[0], geo_code, n_workers if parallel else 1, overwrite)
+        return
+
     if process == "Spectral":
         from .optional.spectral import setup_gee, process_geo_code as process_spectral
         if not cfg.gee_boundaries_asset:
@@ -233,6 +237,27 @@ def run(
             _run_process(process, args_dict, code)
 
     logger.info(f"{process} completed for {len(codes)} regions")
+
+
+def _run_trees(cfg, geo_level: str, geo_code: str | None, n_workers: int, overwrite: bool) -> None:
+    """Segment CHM trees per geo_code into data.trees_dir (no Spark needed)."""
+    import geopandas as gpd
+    from .optional.tree_segmentation import process_geo_code as process_trees, chm_source
+
+    census_parquet = setup_output_dirs(cfg)["database"] / "census_boundaries.parquet"
+    if census_parquet.exists():
+        boundaries = gpd.read_parquet(census_parquet)
+    else:
+        from .pipeline import _read_vector
+        boundaries = _read_vector(cfg.data.census_boundaries).to_crs(cfg.crs)
+    codes = [geo_code] if geo_code else boundaries[geo_level].dropna().unique()
+    logger.info(f"Trees: segmenting {len(codes)} regions from {chm_source(cfg)} with {n_workers} workers")
+    failed = [
+        code for code in tqdm(codes, desc="Regions")
+        if process_trees(geo_level, code, cfg, boundaries, n_workers=n_workers, overwrite=overwrite) is None
+    ]
+    if failed:
+        logger.error(f"Trees failed for {len(failed)} regions: {failed}")
 
 
 @app.command()

@@ -35,9 +35,9 @@ def get_canopy_cover_buildings_raster(
     Requires the `buildings_buffers_<geo_code>` temp view to be registered
     (done by filter_buffer_geometries()). All tiles are binarised and loaded
     into one Sedona DataFrame so Spark distributes the (building x tile) join
-    in a single job. SUM across tiles assumes non-overlapping tiles: buffers
-    spanning a tile boundary aggregate correctly, but overlapping tiles would
-    double-count pixels.
+    in a single job. SUM across tiles assumes non-overlapping tiles (callers
+    composite overlapping ones with chm_sources.resolve_overlap): buffers
+    spanning a tile boundary aggregate correctly.
 
     With already_binary=True the tiles are assumed to hold a 1/0/nodata canopy
     mask already (e.g. the cached GEE download) and the height-threshold
@@ -248,7 +248,16 @@ def process_geo_code(
         search_gdf["geometry"] = search_gdf.buffer(buffer or 0)
 
         if cfg.data.chm_tiles_dir:
-            chm_paths = find_overlapping_rasters(search_gdf, Path(cfg.data.chm_tiles_dir), pattern="*.tif")
+            chm_paths = find_overlapping_rasters(search_gdf, Path(cfg.data.chm_tiles_dir), pattern=cfg.data.chm_pattern)
+            # pixel counts are summed per tile, so overlapping tiles (e.g. survey
+            # years) are first composited into non-overlapping chunks
+            from .optional.chm_sources import resolve_overlap
+            from .optional.tree_segmentation import cache_dir_for
+            chm_paths = resolve_overlap(
+                chm_paths, cfg.data.chm_overlap,
+                cache_dir_for(cfg) / "composite" / f"T30_buildings_{geo_code}_b{buffer}m",
+                bounds=tuple(search_gdf.total_bounds),
+            )
             result_df = get_canopy_cover_buildings_raster(
                 sedona, chm_paths, geo_code, epsg, low_threshold, high_threshold
             )

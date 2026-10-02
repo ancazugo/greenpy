@@ -77,6 +77,16 @@ class DataPaths:
     road_nodes: str | None = None
     trees_dir: str | None = None
     chm_tiles_dir: str | None = None
+    # Glob for CHM tiles under chm_tiles_dir (searched recursively), used by T30,
+    # T30_buildings and Trees. Defra VOM hillshades (VOM_HS_*) are always skipped.
+    chm_pattern: str = "*.tif"
+    # Where CHM tiles overlap (e.g. survey years) — T30, T30_buildings and Trees:
+    # "latest" = last path in sorted order wins (the latest year for <dir>/<year>/
+    # layouts); "max" = per-pixel maximum across them (a tree seen in any survey counts)
+    chm_overlap: str = "latest"
+    # Downloaded CHM tiles, raster indexes, VRTs and overlap composites;
+    # None = $GREENPY_CACHE_DIR, else <output.base_dir>/database/chm_cache
+    chm_cache_dir: str | None = None
     # GEE canopy-height asset (e.g. projects/sat-io/open-datasets/facebook/meta-canopy-height)
     canopy_height_ee_path: str | None = None
 
@@ -124,6 +134,22 @@ class TileSystemConfig:
 
 
 @dataclass
+class TreeSegmentationConfig:
+    """Options for the Trees process, which segments tree crowns from a CHM into data.trees_dir."""
+
+    # "chm_tiles" (data.chm_tiles_dir) or "meta" (Meta/WRI global 1 m CHM from AWS);
+    # None uses chm_tiles when data.chm_tiles_dir is set, else meta
+    source: str | None = None
+    # SegmentationParams preset (legacy_vom = the lidR chm_processing.R settings) and per-field overrides
+    preset: str = "legacy_vom"
+    params: dict = field(default_factory=dict)
+    # Block side in pixels; each block is processed with a halo, in parallel with --parallel --n_workers
+    block_size: int = 2048
+    # "polygon" crowns, or "point" crown centroids (faster; T3/Tree_count only use centroids)
+    geometry: str = "polygon"
+
+
+@dataclass
 class GreenPyConfig:
     study_area_name: str
     crs: str
@@ -145,3 +171,5 @@ class GreenPyConfig:
     osm: OSMConfig = field(default_factory=OSMConfig)
     # Options for buildings set to "open_buildings"
     open_buildings: OpenBuildingsConfig = field(default_factory=OpenBuildingsConfig)
+    # Options for the Trees process
+    tree_segmentation: TreeSegmentationConfig = field(default_factory=TreeSegmentationConfig)

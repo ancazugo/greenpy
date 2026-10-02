@@ -11,6 +11,7 @@ from .schema import (
     OpenBuildingsConfig,
     OutputPaths,
     TileSystemConfig,
+    TreeSegmentationConfig,
     building_source,
     is_open_buildings,
     is_osm,
@@ -39,6 +40,7 @@ def load_config(path: str | Path) -> GreenPyConfig:
     _validate_osm_sources(data_raw, columns_raw)
     osm_cfg = _parse_osm_section(raw.get("osm") or {})
     open_buildings_cfg = _parse_open_buildings_section(raw.get("open_buildings") or {})
+    tree_seg_cfg = _parse_tree_segmentation_section(raw.get("tree_segmentation") or {})
 
     output_raw = raw["output"]
     _require_section(output_raw, "output", "base_dir")
@@ -65,6 +67,9 @@ def load_config(path: str | Path) -> GreenPyConfig:
             road_nodes=data_raw.get("road_nodes"),
             trees_dir=data_raw.get("trees_dir"),
             chm_tiles_dir=data_raw.get("chm_tiles_dir"),
+            chm_pattern=data_raw.get("chm_pattern") or "*.tif",
+            chm_overlap=_parse_chm_overlap(data_raw.get("chm_overlap")),
+            chm_cache_dir=data_raw.get("chm_cache_dir"),
             canopy_height_ee_path=data_raw.get("canopy_height_ee_path"),
         ),
         columns=ColumnMapping(
@@ -101,6 +106,7 @@ def load_config(path: str | Path) -> GreenPyConfig:
         ),
         osm=osm_cfg,
         open_buildings=open_buildings_cfg,
+        tree_segmentation=tree_seg_cfg,
     )
 
 
@@ -205,6 +211,39 @@ def _parse_open_buildings_section(ob_raw: dict) -> OpenBuildingsConfig:
             f"open_buildings.confidence_threshold must be a number in [0, 1), got {confidence_threshold!r}"
         )
     return OpenBuildingsConfig(confidence_threshold=float(confidence_threshold))
+
+
+def _parse_chm_overlap(value) -> str:
+    value = value or "latest"
+    if value not in ("latest", "max"):
+        raise ValueError(f"data.chm_overlap must be 'latest' or 'max', got {value!r}")
+    return value
+
+
+def _parse_tree_segmentation_section(ts_raw: dict) -> TreeSegmentationConfig:
+    from dataclasses import fields
+    from ..optional.tree_segmentation import PRESETS, SegmentationParams
+
+    known = {f.name for f in fields(TreeSegmentationConfig)}
+    unknown = set(ts_raw) - known
+    if unknown:
+        raise ValueError(f"Unknown tree_segmentation keys {sorted(unknown)}; expected {sorted(known)}")
+    cfg = TreeSegmentationConfig(**ts_raw)
+
+    if cfg.source not in (None, "chm_tiles", "meta"):
+        raise ValueError(f"tree_segmentation.source must be 'chm_tiles' or 'meta', got {cfg.source!r}")
+    if cfg.preset not in PRESETS:
+        raise ValueError(f"tree_segmentation.preset must be one of {sorted(PRESETS)}, got {cfg.preset!r}")
+    if cfg.geometry not in ("polygon", "point"):
+        raise ValueError(f"tree_segmentation.geometry must be 'polygon' or 'point', got {cfg.geometry!r}")
+    if not isinstance(cfg.block_size, int) or cfg.block_size < 64:
+        raise ValueError(f"tree_segmentation.block_size must be an integer >= 64, got {cfg.block_size!r}")
+    param_names = {f.name for f in fields(SegmentationParams)}
+    bad = set(cfg.params or {}) - param_names
+    if bad:
+        raise ValueError(f"Unknown tree_segmentation.params {sorted(bad)}; expected some of {sorted(param_names)}")
+    cfg.params = dict(cfg.params or {})
+    return cfg
 
 
 def _require(d: dict, *keys: str) -> None:

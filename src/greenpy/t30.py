@@ -21,13 +21,21 @@ from .utils.data_processing import (
 )
 
 
-def binarise_tiles(chm_paths_lst: list, low_threshold: float, high_threshold: float, target_crs: str | None = None) -> xr.DataArray:
+def binarise_tiles(
+    chm_paths_lst: list, low_threshold: float, high_threshold: float,
+    target_crs: str | None = None, overlap: str = "latest",
+) -> xr.DataArray:
     """Merge CHM raster tiles and binarise to a canopy (1) / no-canopy (0) mask.
 
     Tiles are opened with their nodata mask applied, so nodata pixels stay NaN
     in the result and are excluded from canopy-cover statistics rather than
-    being counted as no-canopy.
+    being counted as no-canopy. Where tiles overlap, overlap="latest" keeps
+    the last path in sorted order and "max" the per-pixel maximum height
+    (data.chm_overlap).
     """
+    if overlap not in ("latest", "max"):
+        raise ValueError(f"overlap must be 'latest' or 'max', got {overlap!r}")
+    chm_paths_lst = sorted(str(p) for p in chm_paths_lst)
     logger.info(f"Binarising {len(chm_paths_lst)} CHM tiles")
 
     chm_xr_lst = []
@@ -41,7 +49,7 @@ def binarise_tiles(chm_paths_lst: list, low_threshold: float, high_threshold: fl
 
     if not chm_xr_lst:
         raise FileNotFoundError("No readable CHM tiles overlap the boundary")
-    merged_chm_xr = merge_arrays(chm_xr_lst)
+    merged_chm_xr = merge_arrays(chm_xr_lst, method="last" if overlap == "latest" else "max")
     if target_crs is not None and merged_chm_xr.rio.crs is not None:
         from pyproj import CRS as ProjCRS
         if merged_chm_xr.rio.crs != ProjCRS.from_user_input(target_crs):
@@ -156,8 +164,8 @@ def process_geo_code(
 
         if cfg.data.chm_tiles_dir:
             chm_dir = Path(cfg.data.chm_tiles_dir)
-            chm_paths = find_overlapping_rasters(geo_boundary_gdf, chm_dir, pattern="*.tif")
-            binary_chm_xr = binarise_tiles(chm_paths, low_threshold, high_threshold, target_crs=cfg.crs)
+            chm_paths = find_overlapping_rasters(geo_boundary_gdf, chm_dir, pattern=cfg.data.chm_pattern)
+            binary_chm_xr = binarise_tiles(chm_paths, low_threshold, high_threshold, target_crs=cfg.crs, overlap=cfg.data.chm_overlap)
             geo_canopy_cover_df = get_canopy_cover_raster(geo_boundary_gdf, binary_chm_xr)
 
         elif cfg.data.canopy_height_ee_path:

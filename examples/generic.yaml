@@ -22,8 +22,11 @@ data:
   #                    only — NOT Europe or North America)
   buildings: /path/to/buildings.gpkg
 
-  # Directory containing tree polygon vector files (one .gpkg per area/tile).
-  # Set to null if you are providing chm_tiles_dir instead.
+  # Tree polygons: a single vector/parquet file, or a directory of .gpkg /
+  # .parquet tiles (only tiles whose extent overlaps the area being processed
+  # are read). `greenpy run -p Trees` fills this directory by segmenting a CHM
+  # (see tree_segmentation below). Set to null if you are providing
+  # chm_tiles_dir instead.
   trees_dir: /path/to/trees/
 
   # Park polygon file — or "osm"
@@ -45,6 +48,21 @@ data:
   # Set to null to compute T30/T30_buildings from tree polygon areas instead.
   # Tiles must not overlap (T30_buildings sums pixel counts across tiles).
   chm_tiles_dir: null
+
+  # Glob for the CHM tiles under chm_tiles_dir (searched recursively; T30,
+  # T30_buildings and Trees). Defra VOM hillshades (VOM_HS_*) are always skipped.
+  chm_pattern: "*.tif"
+
+  # Where CHM tiles overlap (e.g. several survey years) — T30, T30_buildings
+  # and Trees: "latest" = last path in sorted order wins (the latest year for
+  # <dir>/<year>/ layouts); "max" = per-pixel maximum, so a tree seen in any
+  # survey counts (recommended for Defra VOM, whose later surveys were often
+  # flown leaf-off and miss many deciduous street trees)
+  chm_overlap: latest
+
+  # Downloaded Meta tiles, raster indexes, VRTs and overlap composites;
+  # null = $GREENPY_CACHE_DIR, else <output.base_dir>/database/chm_cache
+  chm_cache_dir: null
 
   # Google Earth Engine canopy-height asset for T30/T30_buildings (requires
   # gee_project below).
@@ -128,6 +146,27 @@ gee_boundaries_asset: null
 # finest geo level. Typical urban sizes: 8 ≈ 0.74 km², 9 ≈ 0.11 km², 10 ≈ 0.015 km².
 # Can also be set per run with --h3_resolution (CLI overrides config).
 # h3_resolution: 9
+
+# Trees process (`-p Trees`): segments individual crowns from a canopy height
+# model into data.trees_dir (trees_<geo_code>.parquet), ready for T3,
+# Tree_count and Visibility. Runs per --geo_level code; --parallel
+# --n_workers N processes blocks in parallel.
+tree_segmentation:
+  # "chm_tiles" (data.chm_tiles_dir) or "meta" (Meta/WRI global 1 m canopy
+  # height, downloaded from AWS — no account needed); null = chm_tiles when
+  # chm_tiles_dir is set, else meta
+  source: null
+  # Parameter preset: vom (tuned on 1 m LiDAR CHMs against tree surveys —
+  # finds ~40 % more surveyed trees than the lidR settings), meta (tuned for
+  # source: meta), or legacy_vom (reproduces the lidR settings used for the
+  # Defra VOM trees)
+  preset: legacy_vom
+  # Overrides of individual parameters, e.g. {hmin: 3, smoothing: gaussian, smooth_size: 1.5}
+  params: {}
+  # Block side in pixels (each block is processed with a halo)
+  block_size: 2048
+  # polygon crowns, or point crown centroids (faster; T3 only needs centroids)
+  geometry: polygon
 
 # Tile system — set enabled: true only for UK DEFRA VOM data (or similar grid-tiled datasets)
 tile_system:
