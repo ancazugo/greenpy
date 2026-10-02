@@ -111,14 +111,25 @@ def find_overlapping_files(boundary_gdf: gpd.GeoDataFrame, files_dir: Path, patt
     return hits["path"].tolist()
 
 
+# Rasters that sit beside CHM tiles but are not heights: Defra VOM ships a
+# uint8 hillshade (VOM_HS_*) next to every height tile, and "*.tif" picks both up.
+NON_CHM_PREFIXES = ("VOM_HS_",)
+
+
+def is_chm_tile(path) -> bool:
+    """False for known non-height rasters stored alongside CHM tiles (e.g. Defra VOM hillshades)."""
+    return not Path(path).name.startswith(NON_CHM_PREFIXES)
+
+
 def find_overlapping_rasters(boundary_gdf: gpd.GeoDataFrame, files_dir: Path, pattern: str = "*.tif") -> list[Path]:
     """Returns raster paths under files_dir (searched recursively) whose bounding box intersects boundary_gdf.
 
     Tile bounds are transformed to the boundary CRS before the test, so tiles
-    stored in another CRS are still selected correctly.
+    stored in another CRS are still selected correctly. Known non-height
+    rasters (see is_chm_tile) are skipped.
     """
     import rioxarray as rxr
-    files = sorted(files_dir.rglob(pattern))
+    files = sorted(p for p in files_dir.rglob(pattern) if is_chm_tile(p))
     if not files:
         return []
 
