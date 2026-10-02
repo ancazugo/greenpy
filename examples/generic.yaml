@@ -138,14 +138,23 @@ output:
 #   exclude_private: true       # drop parks tagged access=private/no/customers
 #   fetch_buffer: 2000          # metres around the census boundary for roads/parks
 
+# Ignore green spaces smaller than this (hectares) in T300. The WHO guideline
+# behind the 300 rule uses >= 0.5-1 ha. null keeps every park.
+park_min_area_ha: null
+
 # GEE configuration — only needed for the Spectral module
 gee_project: null
 gee_boundaries_asset: null
 
-# Aggregate to uniform H3 hexagons at this resolution (0-15) instead of the
-# finest geo level. Typical urban sizes: 8 ≈ 0.74 km², 9 ≈ 0.11 km², 10 ≈ 0.015 km².
-# Can also be set per run with --h3_resolution (CLI overrides config).
-# h3_resolution: 9
+# Aggregate to uniform DGGS cells instead of the finest geo level.
+# Systems and resolution ranges: h3 (0-15), s2 (0-30), geohash (1-12),
+# a5 (0-30), rhealpix (0-15). Typical urban H3 sizes: 8 ≈ 0.74 km²,
+# 9 ≈ 0.11 km², 10 ≈ 0.015 km². h3 and s2 run distributed via Sedona and are
+# recommended for country-scale areas; the rest are built driver-side.
+# Can also be set per run with --dggs/--dggs_resolution (CLI overrides config).
+# dggs: h3
+# dggs_resolution: 9
+# h3_resolution: 9  # deprecated alias for dggs: h3 + dggs_resolution
 
 # Trees process (`-p Trees`): segments individual crowns from a canopy height
 # model into data.trees_dir (trees_<geo_code>.parquet), ready for T3,
@@ -168,7 +177,8 @@ tree_segmentation:
   # polygon crowns, or point crown centroids (faster; T3 only needs centroids)
   geometry: polygon
 
-# Tile system — set enabled: true only for UK DEFRA VOM data (or similar grid-tiled datasets)
+# Tile system — legacy key kept for older configs; tree and CHM tile
+# directories are always searched by file extent, whatever this is set to
 tile_system:
   enabled: false
   tile_name_pattern: null
