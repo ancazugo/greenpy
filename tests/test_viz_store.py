@@ -123,3 +123,72 @@ def test_point_trees_without_size(tmp_path):
         assert ts.tile("trees", None, 16, *_tile_xy(16))
     finally:
         ts.close()
+
+
+def test_quantiles_survive_a_dominant_value():
+    """83 of 85 units at 0 (e.g. % meeting 3-30-300): the non-zero units still get their own classes."""
+    import duckdb
+    from greenpy.viz.store import N_CLASSES, metric_stats
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE units AS SELECT 0.0 AS pct_meets_3 FROM range(83) UNION ALL SELECT 7.0 UNION ALL SELECT 22.6")
+    q = metric_stats(con, "units", "pct_meets_3")["quantile"]
+    assert q[0] <= 0 < 7.0 == min(b for b in q if b > 0)  # 0 keeps a class; 7 starts the next one
+    assert sum(b > 0 for b in q) >= 3
+
+    # an ordinary spread keeps plain quantiles
+    con.execute("CREATE TABLE spread AS SELECT CAST(range AS DOUBLE) AS pct_meets_3 FROM range(100)")
+    assert metric_stats(con, "spread", "pct_meets_3")["quantile"] == [round(99 * i / N_CLASSES, 4) for i in range(1, N_CLASSES)]
+
+
+def test_rule_flags_link_to_their_gradients(store):
+    _, _, ts = store
+    bm = {m["name"]: m for m in ts.meta["layers"]["buildings"]["metrics"]}
+    assert {f: bm[f].get("gradient") for f in ("meets_3", "meets_30", "meets_300", "meets_3_30_300")} == {
+        "meets_3": "tree_count_50m", "meets_30": "unit_canopy_cover",
+        "meets_300": "distance_euclidean", "meets_3_30_300": "criteria_met",
+    }
+    assert bm["criteria_met"]["threshold"] == 3 and bm["unit_canopy_cover"]["threshold"] == 30
+    # B0 meets only 300, B1 only 3, B2 all three
+    assert [ts.feature("buildings", i)["criteria_met"] for i in "012"] == [1, 1, 3]
+    assert ts.feature("buildings", "2")["unit_canopy_cover"] == 41.0
+    stats = json.loads(ts.stats("buildings", "criteria_met"))
+    assert stats["min"] == 1 and stats["max"] == 3
+
+
+def test_parks_layer(store):
+    _, _, ts = store
+    assert ts.meta["parks"] == {"count": 2, "used": 1, "min_area_ha": 0.5}
+    assert ts.has_layer("parks")
+    assert ts.tile("parks", None, 16, *_tile_xy(16))
+
+
+def test_level_labels_and_unit_names(tmp_path):
+    make_outputs(tmp_path, merged=True)
+    cfg = make_config(tmp_path, geo_level_labels={"TRACT": "Tract"}, geo_level_names={"TRACT": "TRACT_NAME"})
+    ts = _open(ensure_store(build_catalog(cfg)))
+    try:
+        assert ts.meta["layers"]["TRACT"]["label"] == "Tract" and ts.meta["layers"]["DIST"]["label"] == "DIST"
+        assert ts.feature("TRACT", "T1")["name"] == "Southbank"
+        b = ts.feature("buildings", "2")
+        assert b["TRACT"] == "T1" and b["name:TRACT"] == "Southbank"
+    finally:
+        ts.close()
+
+
+def test_merge_gaps_fall_back_to_module_outputs(tmp_path):
+    """A unit missing from Merge's table (e.g. no buildings) still shows T30's canopy."""
+    import pandas as pd
+
+    make_outputs(tmp_path)
+    pd.DataFrame({"TRACT": ["T0"], "canopy_cover": [99.0], "pct_meets_3_30_300": [50.0]}).to_parquet(
+        tmp_path / "database" / "T3_30_300_spectral.parquet", index=False
+    )
+    ts = _open(ensure_store(build_catalog(make_config(tmp_path))))
+    try:
+        assert ts.feature("TRACT", "T0")["canopy_cover"] == 99.0  # Merge's value wins where present
+        assert ts.feature("TRACT", "T1")["canopy_cover"] == 41.0  # T30's where Merge has none
+        tract = {m["name"]: m["module"] for m in ts.meta["layers"]["TRACT"]["metrics"]}
+        assert tract["canopy_cover"] == "Merge" and list(tract).count("canopy_cover") == 1
+    finally:
+        ts.close()

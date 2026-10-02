@@ -1,0 +1,74 @@
+# Nairobi, Kenya — 3-30-300 per building from global open data.
+# Buildings and parks: Overture Maps. Roads and park entrances: OpenStreetMap.
+# Trees (the "3"): segmented from the Meta/WRI global 1 m canopy height model
+# (AWS tiles, `-p Trees`). Canopy cover (the "30"): the same Meta CHM via
+# Google Earth Engine. Census units: geoBoundaries county > sub-county > ward.
+#
+# Reproduce (all data under /scratch):
+#   python scripts/prepare_geoboundaries.py --iso KEN --adm1 Nairobi --levels 3 \
+#       --out /scratch/acz25/greenpy_runs/nairobi/input/nairobi_wards.parquet
+#   export SPARK_LOCAL_DIRS=/scratch/acz25/spark_tmp
+#   greenpy run -c examples/nairobi.yaml -p Trees --geo_level ADM2_code --parallel --n_workers 32
+#   greenpy run -c examples/nairobi.yaml -p T3 --geo_level ADM2_code --buffer 50
+#   greenpy run -c examples/nairobi.yaml -p T3 --geo_level ADM2_code --buffer 100
+#   greenpy run -c examples/nairobi.yaml -p T30 --geo_level ADM2_code --gee_scale 10
+#   greenpy run -c examples/nairobi.yaml -p T300 --geo_level ADM2_code
+#   greenpy run -c examples/nairobi.yaml -p Tree_count --geo_level ADM2_code
+#   greenpy run -c examples/nairobi.yaml -p T30_buildings --geo_level ADM2_code --buffer 50 --gee_scale 10
+#   greenpy run -c examples/nairobi.yaml -p T30_buildings --geo_level ADM2_code --buffer 100 --gee_scale 10
+#   greenpy run -c examples/nairobi.yaml -p Merge --t3_buffers 50 --t3_buffers 100
+#     (the rule's "30" is the ward canopy; add --rule_t30_buffer 50 or 100 to use per-building canopy)
+# H3 aggregation beside the wards (repeat with --dggs_resolution 8 for ~0.7 km2 cells):
+#   greenpy run -c examples/nairobi.yaml -p T30 --geo_level ADM2_code --gee_scale 10 --dggs h3 --dggs_resolution 9
+#   greenpy run -c examples/nairobi.yaml -p Tree_count --geo_level ADM2_code --dggs h3 --dggs_resolution 9
+#   greenpy run -c examples/nairobi.yaml -p Merge --t3_buffers 50 --t3_buffers 100 --dggs h3 --dggs_resolution 9
+#   greenpy viz -c examples/nairobi.yaml  # unit menu: wards, sub-counties or H3 res 8 / 9
+
+study_area_name: Nairobi
+crs: EPSG:32737  # WGS 84 / UTM zone 37S
+
+data:
+  buildings: overture
+  parks_sites: overture
+  # access points: OSM entrances/gates, else where park boundaries cross roads
+  parks_access: osm
+  roads: osm
+  census_boundaries: /scratch/acz25/greenpy_runs/nairobi/input/nairobi_wards.parquet
+  # written by `-p Trees`, read by T3 and Tree_count
+  trees_dir: /scratch/acz25/greenpy_runs/nairobi/trees
+  # Meta/WRI global canopy height, binarised in GEE for T30
+  canopy_height_ee_path: projects/sat-io/open-datasets/facebook/meta-canopy-height
+  # Meta CHM tiles, VRTs and other CHM caches
+  chm_cache_dir: /scratch/acz25/greenpy_cache
+
+overture:
+  # Overture land_use subtypes/classes counted as parks; protected areas such as
+  # Nairobi National Park (fenced, ticketed) are deliberately left out
+  park_land_use: [park, recreation_ground]
+
+osm:
+  network_type: walk
+  fetch_buffer: 2000
+
+tree_segmentation:
+  source: meta
+  preset: meta
+  geometry: polygon
+
+# WHO guidance behind the 300 rule uses green spaces of >= 0.5-1 ha
+park_min_area_ha: 0.5
+
+columns:
+  # geoBoundaries (gbOpen) shape IDs; *_name columns hold the names
+  geo_levels:
+    - ADM1_code  # county
+    - ADM2_code  # sub-county / constituency
+    - ADM3_code  # ward
+  # how the viz names the levels and where it finds each unit's name
+  geo_level_labels: {ADM1_code: County, ADM2_code: Sub-county, ADM3_code: Ward}
+  geo_level_names: {ADM1_code: ADM1_name, ADM2_code: ADM2_name, ADM3_code: ADM3_name}
+
+output:
+  base_dir: /scratch/acz25/greenpy_runs/nairobi/output
+
+gee_project: ee-phd-thesis

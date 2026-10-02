@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from .config.loader import load_config
 from .dggs import RESOLUTION_RANGES, SYSTEM_NAMES, get_system
-from .pipeline import load_tables, setup_output_dirs
+from .pipeline import load_tables, setup_output_dirs, unit_output_name
 from .utils.logging_config import setup_logger
 from .utils.sedona_config import get_spark
 from . import t3 as t3_module
@@ -159,7 +159,7 @@ def run(
     if process == "Merge":
         from .merge import merge_output_csv, process_data
         sedona = get_spark()
-        merge_output_csv(sedona, cfg, t3_buffers)
+        merge_output_csv(sedona, cfg, t3_buffers, dggs=dggs, dggs_resolution=dggs_resolution)
         if dggs is not None:
             # one output row per cell unless the user aggregates up to a census level
             merge_geo_level = geo_level or sub_geo_level
@@ -204,6 +204,10 @@ def run(
 
     output_dir_map = {"T3": dirs["t3"], "T30": dirs["t30"], "T30_buildings": dirs["t30_buildings"], "T300": dirs["t300"], "Tree_count": dirs["tree_count"], "Visibility": dirs["visibility"]}
     output_dir = output_dir_map[process]
+    if dggs is not None and process in ("T30", "Tree_count"):
+        # grid runs sit beside the census-unit outputs instead of overwriting them
+        output_dir = dirs["base"] / unit_output_name(process, dggs, dggs_resolution)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     args_dict = {
         "sedona": sedona,

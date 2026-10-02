@@ -15,13 +15,15 @@ from ..merge import RULE_MAX_DISTANCE, RULE_MIN_CANOPY, RULE_MIN_TREES, _buffers
 
 BUILDING_KEY = "building_id"
 RULE_FLAGS = ("meets_3", "meets_30", "meets_300", "meets_3_30_300")
+# per-building number of rule criteria met (0-3), derived in the store from the flags
+CRITERIA_MET = "criteria_met"
 # columns that are bookkeeping, not metrics
 _SKIP_COLUMNS = {"total_pixels", "tree_pixels", "area", "geometry", "closest_park_access_id", "closest_park_site_id"}
 
 
 @dataclass(frozen=True)
 class Metric:
-    """One mappable column. `better` says which end of the ramp is green."""
+    """One mappable column. `better` says which end of the ramp is the good (dark) end."""
 
     name: str
     label: str
@@ -29,6 +31,8 @@ class Metric:
     kind: str  # count, percent, distance, boolean, index, value
     threshold: float | None = None
     better: str | None = None  # "high", "low" or None
+    # for a rule flag: the metric it tests, which the map shows as a gradient around the threshold
+    gradient: str | None = None
 
 
 @dataclass
@@ -55,6 +59,7 @@ class UnitLayer:
     overlay: Path | None  # building_id -> code lookup, for building averages
     sources: list[Source] = field(default_factory=list)
     merged: bool = False  # metrics come from Merge, which already averages buildings
+    name_col: str | None = None  # boundaries column with each unit's display name
 
 
 @dataclass
@@ -62,6 +67,12 @@ class TreeSource:
     paths: list[Path]
     height_col: str
     area_col: str
+
+
+@dataclass
+class ParkSource:
+    path: Path
+    min_area_ha: float | None  # parks below this are ignored by T300 (park_min_area_ha)
 
 
 @dataclass
@@ -74,10 +85,13 @@ class Catalog:
     unit_layers: list[UnitLayer]
     trees: TreeSource | None
     census_levels: list[str] = field(default_factory=list)
+    parks: ParkSource | None = None
+    # rule flag -> metric it tests (see Metric.gradient)
+    rule_gradients: dict[str, str] = field(default_factory=dict)
 
     def fingerprint_paths(self) -> list[Path]:
         """Every input file the viz store is built from, for staleness checks."""
-        paths = [self.buildings]
+        paths = [self.buildings] + ([self.parks.path] if self.parks else [])
         for src in self.building_sources + [s for u in self.unit_layers for s in u.sources]:
             paths += _expand(src.path)
         for u in self.unit_layers:
@@ -113,6 +127,10 @@ def describe(name: str, module: str = "") -> Metric:
         return Metric(name, "Water distance (m)", module or "T300", "distance", better="low")
     if base == "canopy_cover":
         return Metric(name, "Canopy cover (%)", module or "T30", "percent", RULE_MIN_CANOPY, "high")
+    if base == "unit_canopy_cover":
+        return Metric(name, "Canopy cover of the building's unit (%)", module or "Rule", "percent", RULE_MIN_CANOPY, "high")
+    if base == CRITERIA_MET:
+        return Metric(name, "3-30-300 criteria met (of 3)", module or "Rule", "count", 3, "high")
     if m := re.fullmatch(r"building_canopy_cover_(\d+)m", base):
         return Metric(name, f"Canopy cover within {m.group(1)} m (%)", module or "T30_buildings", "percent", RULE_MIN_CANOPY, "high")
     if m := re.fullmatch(r"visible_trees_(\d+)m", base):
@@ -202,7 +220,11 @@ def _building_sources(base: Path, db: Path) -> list[Source]:
     rule = db / "T3_30_300_buildings.parquet"
     if rule.exists():
         cols = _parquet_columns(rule)
-        sources.append(Source(str(rule), "parquet", BUILDING_KEY, {c: c for c in RULE_FLAGS if c in cols}, "Rule"))
+        columns = {c: c for c in RULE_FLAGS if c in cols}
+        # the unit canopy the rule's "30" used (T30_buildings canopy already has its own metric)
+        if "canopy_cover" in cols:
+            columns["canopy_cover"] = "unit_canopy_cover"
+        sources.append(Source(str(rule), "parquet", BUILDING_KEY, columns, "Rule"))
 
     buildings_cols = _parquet_columns(db / "buildings.parquet")
     if "distance_water" in buildings_cols:
@@ -211,23 +233,41 @@ def _building_sources(base: Path, db: Path) -> list[Source]:
     return [s for s in sources if s and s.columns]
 
 
+def _grid_suffixes(db: Path) -> list[str]:
+    """Grid columns (e.g. h3_9) of the DGGS boundaries built in the database."""
+    out = []
+    for path in sorted(db.glob("*_boundaries_res*.parquet")):
+        m = re.fullmatch(r"(\w+?)_boundaries_res(\d+)\.parquet", path.name)
+        if m and m.group(1) in SYSTEM_NAMES:
+            out.append(f"{m.group(1)}_{m.group(2)}")
+    return out
+
+
 def _unit_sources(base: Path, db: Path) -> list[Source]:
-    """Native unit-level outputs; each keys on its first column (the sub-geo level it ran at)."""
+    """Native unit-level outputs; each keys on its first column (the sub-geo level it ran at).
+
+    Census-unit runs use the plain names; DGGS runs of T30, Tree_count and
+    Merge use grid-suffixed ones (T30_h3_9/, T3_30_300_spectral_h3_9.parquet).
+    """
     sources = []
-    merged = db / "T3_30_300_spectral.parquet"
-    if merged.exists():
-        cols = _parquet_columns(merged)
-        sources.append(Source(str(merged), "parquet", cols[0], {c: c for c in cols[1:] if c not in _SKIP_COLUMNS}, "Merge"))
-    for module in ("T30", "Tree_count", "Spectral"):
-        src = _source(db, base / module, f"{module}.parquet", "*.csv", "", {}, module)
-        if not src:
-            continue
-        cols = _columns(src.path, src.fmt)
-        src.key = cols[0]
-        src.columns = {c: c for c in cols[1:] if c not in _SKIP_COLUMNS}
-        if module == "Tree_count":
-            src.zero_fill = _codes(base / module, "Tree_count_", ".csv")
-        sources.append(src)
+    for suffix in ["", *(f"_{g}" for g in _grid_suffixes(db))]:
+        merged = db / f"T3_30_300_spectral{suffix}.parquet"
+        if merged.exists():
+            cols = _parquet_columns(merged)
+            sources.append(Source(str(merged), "parquet", cols[0], {c: c for c in cols[1:] if c not in _SKIP_COLUMNS}, "Merge"))
+        for module in ("T30", "Tree_count", "Spectral"):
+            if suffix and module == "Spectral":
+                continue  # Spectral has no DGGS mode
+            name = f"{module}{suffix}"
+            src = _source(db, base / name, f"{name}.parquet", "*.csv", "", {}, module)
+            if not src:
+                continue
+            cols = _columns(src.path, src.fmt)
+            src.key = cols[0]
+            src.columns = {c: c for c in cols[1:] if c not in _SKIP_COLUMNS}
+            if module == "Tree_count":
+                src.zero_fill = _codes(base / name, "Tree_count_", ".csv")
+            sources.append(src)
     return [s for s in sources if s.columns]
 
 
@@ -235,7 +275,10 @@ def _unit_layers(cfg: GreenPyConfig, db: Path, unit_sources: list[Source]) -> li
     layers = []
     overlay = db / "census_buildings_overlay.parquet"
     for level in cfg.columns.geo_levels:
-        layers.append(UnitLayer(level, level, db / "census_boundaries.parquet", overlay if overlay.exists() else None))
+        layers.append(UnitLayer(
+            level, cfg.columns.geo_level_labels.get(level, level), db / "census_boundaries.parquet",
+            overlay if overlay.exists() else None, name_col=cfg.columns.geo_level_names.get(level),
+        ))
     for path in sorted(db.glob("*_boundaries_res*.parquet")):
         m = re.fullmatch(r"(\w+?)_boundaries_res(\d+)\.parquet", path.name)
         if not m or m.group(1) not in SYSTEM_NAMES:
@@ -253,20 +296,44 @@ def _unit_layers(cfg: GreenPyConfig, db: Path, unit_sources: list[Source]) -> li
             continue
         if src.module == "Merge":
             layer.merged = True
-        else:
-            # Merge's table already carries these columns at its level
-            taken = {m for s in layer.sources for m in s.columns.values()}
-            src.columns = {c: m for c, m in src.columns.items() if m not in taken}
+        # a metric in both Merge's table and a module's output takes Merge's value
+        # where it has one, else the module's (see store._join_metrics)
         if src.columns:
             layer.sources.append(src)
     return layers
+
+
+def _rule_gradients(db: Path) -> dict[str, str]:
+    """Which metric each rule flag tests, read from the columns Merge wrote beside the flags."""
+    rule = db / "T3_30_300_buildings.parquet"
+    if not rule.exists():
+        return {}
+    cols = _parquet_columns(rule)
+    out = {}
+    if t := next((c for c in cols if re.fullmatch(r"tree_count_\d+m", c)), None):
+        out["meets_3"] = t
+    if c := next((c for c in cols if re.fullmatch(r"building_canopy_cover_\d+m", c)), None):
+        out["meets_30"] = c
+    elif "canopy_cover" in cols:
+        out["meets_30"] = "unit_canopy_cover"
+    if d := next((c for c in ("distance_euclidean", "distance_manhattan") if c in cols), None):
+        out["meets_300"] = d
+    if "meets_3_30_300" in cols:
+        out["meets_3_30_300"] = CRITERIA_MET
+    return out
+
+
+def _park_source(cfg: GreenPyConfig, db: Path) -> ParkSource | None:
+    path = db / "parks_sites.parquet"
+    return ParkSource(path, cfg.park_min_area_ha) if path.exists() else None
 
 
 def _tree_source(cfg: GreenPyConfig) -> TreeSource | None:
     if not cfg.data.trees_dir:
         return None
     p = Path(cfg.data.trees_dir)
-    paths = [p] if p.is_file() else sorted(p.glob("*.gpkg"))
+    # same files T3 reads: a single file, or the .gpkg/.parquet tiles of a directory (e.g. from -p Trees)
+    paths = [p] if p.is_file() else sorted([*p.glob("*.gpkg"), *p.glob("*.parquet")])
     if not paths:
         return None
     return TreeSource(paths, cfg.columns.tree_height_col, cfg.columns.tree_area_col)
@@ -291,4 +358,6 @@ def build_catalog(cfg: GreenPyConfig) -> Catalog:
         unit_layers=_unit_layers(cfg, db, unit_sources),
         trees=_tree_source(cfg),
         census_levels=list(cfg.columns.geo_levels),
+        parks=_park_source(cfg, db),
+        rule_gradients=_rule_gradients(db),
     )

@@ -16,15 +16,19 @@ from pyspark.sql.dataframe import DataFrame
 from pyspark.sql.session import SparkSession
 
 from .config.schema import GreenPyConfig
-from .pipeline import build_buildings_overlay, ensure_dggs_files
+from .pipeline import build_buildings_overlay, ensure_dggs_files, unit_output_name
 from .utils.data_processing import save_temp_file
 
 
-def merge_output_csv(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: list[int], file_format: str = "parquet") -> None:
+def merge_output_csv(
+    sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: list[int], file_format: str = "parquet",
+    dggs: str | None = None, dggs_resolution: int | None = None,
+) -> None:
     """Consolidate the per-geo CSV files of each module into one parquet per module.
 
     Modules with no CSV output (e.g. Spectral when it was never run) are
-    skipped with a warning instead of failing.
+    skipped with a warning instead of failing. With a DGGS, T30 and Tree_count
+    are read from (and written to) their grid-suffixed names, e.g. T30_h3_9.
     """
     logger.info("Merging module CSV outputs into parquet")
 
@@ -40,7 +44,8 @@ def merge_output_csv(sedona: SparkSession, cfg: GreenPyConfig, t3_buffer_lst: li
         t3_sdf = sedona.read.format("csv").option("header", True).option("inferSchema", True).load(str(base / "T3") + f"/*_{buffer}m.csv")
         save_temp_file(t3_sdf, t3_parquet, coalesce=1, file_format=file_format)
 
-    for name in ["T30", "T300", "Spectral", "Tree_count"]:
+    for module in ["T30", "T300", "Spectral", "Tree_count"]:
+        name = unit_output_name(module, dggs, dggs_resolution)
         if not list((base / name).glob("*.csv")):
             logger.warning(f"No {name} CSV outputs found — skipping")
             continue
@@ -81,12 +86,13 @@ def read_parquet_files(
     db_dir = Path(cfg.output.base_dir) / "database"
 
     missing = []
-    for name in ["T30", "T300", "Tree_count"]:
+    for module in ["T30", "T300", "Tree_count"]:
+        name = unit_output_name(module, dggs, dggs_resolution)
         p = db_dir / f"{name}.parquet"
         if not p.exists():
             missing.append(name)
             continue
-        sedona.read.format("parquet").load(str(p)).createOrReplaceTempView(name.lower())
+        sedona.read.format("parquet").load(str(p)).createOrReplaceTempView(module.lower())
 
     for buffer in t3_buffer_lst:
         p = db_dir / f"T3_{buffer}m.parquet"
@@ -286,6 +292,7 @@ def compute_compliance(
     rule_t3_buffer: int = 50,
     rule_t30_buffer: int | None = None,
     rule_distance: str = "euclidean",
+    out_name: str = "T3_30_300_buildings",
 ) -> DataFrame:
     """Evaluate the 3-30-300 rule per building and aggregate the pass rates to geo_level.
 
@@ -293,7 +300,7 @@ def compute_compliance(
     building's sub_geo_level unit (the neighbourhood reading of the rule), or
     T30_buildings canopy within rule_t30_buffer metres when given. 300: park
     distance, straight-line (`euclidean`, the WHO guideline) or road
-    `network`. Writes database/T3_30_300_buildings.parquet and registers the
+    `network`. Writes database/<out_name>.parquet and registers the
     `compliance_agg` view with pct_meets_* columns.
     """
     if rule_distance not in ("euclidean", "network"):
@@ -332,7 +339,7 @@ def compute_compliance(
 
     evaluated = evaluate_rule(buildings_df, tree_col, canopy_col, distance_col)
     db_dir = Path(cfg.output.base_dir) / "database"
-    evaluated.to_parquet(db_dir / "T3_30_300_buildings.parquet", index=False)
+    evaluated.to_parquet(db_dir / f"{out_name}.parquet", index=False)
 
     summary = summarise_rule(evaluated, geo_level)
     compliance_sdf = sedona.createDataFrame(summary)
@@ -437,28 +444,54 @@ def merge_all(
     t30_buildings_buffers: list[int] | None = None,
     visibility_buffers: list[int] | None = None,
 ) -> DataFrame:
-    """Join the building-level aggregates with canopy cover, spectral indices, tree totals and rule pass rates."""
+    """Join the building-level aggregates with canopy cover, spectral indices, tree totals and rule pass rates.
+
+    One row per geo_level unit that has buildings, canopy cover or trees: a unit
+    without buildings (a forest, a park) still reports its canopy and tree
+    total, with the building metrics left null. `has_buildings` marks units
+    with building aggregates.
+    """
     ts_cols = [c for c in sedona.table("t30_spectral").columns if c != geo_level]
     sel = "".join(f", ts.{c}" for c in ts_cols)
+    agg_cols = [c for c in sedona.table("t3_300_agg").columns if c != geo_level]
+    agg_sel = "".join(f", t3_300_agg.{c}" for c in agg_cols)
     extra_sel, extra_join = "", ""
     if t30_buildings_buffers:
         extra_sel += "".join(f", tb.building_canopy_cover_{b}m" for b in t30_buildings_buffers)
-        extra_join += f"LEFT JOIN t30_buildings_agg tb ON t3_300_agg.{geo_level} = tb.{geo_level}\n"
+        extra_join += f"LEFT JOIN t30_buildings_agg tb ON u.{geo_level} = tb.{geo_level}\n"
     if visibility_buffers:
         extra_sel += "".join(f", va.visible_trees_{b}m" for b in visibility_buffers)
-        extra_join += f"LEFT JOIN visibility_agg va ON t3_300_agg.{geo_level} = va.{geo_level}\n"
+        extra_join += f"LEFT JOIN visibility_agg va ON u.{geo_level} = va.{geo_level}\n"
     comp_cols = [c for c in sedona.table("compliance_agg").columns if c != geo_level]
     comp_sel = "".join(f", ca.{c}" for c in comp_cols)
     result = sedona.sql(f"""
-    SELECT t3_300_agg.*{sel}{extra_sel}, tca.total_trees{comp_sel}
-    FROM t3_300_agg
-    LEFT JOIN t30_spectral ts ON t3_300_agg.{geo_level} = ts.{geo_level}
-    LEFT JOIN tree_count_agg tca ON t3_300_agg.{geo_level} = tca.{geo_level}
-    LEFT JOIN compliance_agg ca ON t3_300_agg.{geo_level} = ca.{geo_level}
+    SELECT u.{geo_level}{agg_sel}{sel}{extra_sel}, tca.total_trees{comp_sel},
+           t3_300_agg.{geo_level} IS NOT NULL AS has_buildings
+    FROM (SELECT DISTINCT {geo_level} FROM boundaries WHERE {geo_level} IS NOT NULL) u
+    LEFT JOIN t3_300_agg ON u.{geo_level} = t3_300_agg.{geo_level}
+    LEFT JOIN t30_spectral ts ON u.{geo_level} = ts.{geo_level}
+    LEFT JOIN tree_count_agg tca ON u.{geo_level} = tca.{geo_level}
+    LEFT JOIN compliance_agg ca ON u.{geo_level} = ca.{geo_level}
     {extra_join}
+    WHERE t3_300_agg.{geo_level} IS NOT NULL OR ts.{geo_level} IS NOT NULL OR tca.{geo_level} IS NOT NULL
     """)
     result.createOrReplaceTempView("t3_30_300_spectral")
     return result
+
+
+def fill_unit_counts(result_df: pd.DataFrame, t3_buffer_lst: list[int]) -> pd.DataFrame:
+    """Zero-fill counts that are missing because they are zero, and drop merge_all's has_buildings marker.
+
+    Units with no tree at all are absent from Tree_count's CSVs (total_trees = 0);
+    the mean trees per building is 0 where the unit has buildings and stays
+    null where it has none.
+    """
+    result_df = result_df.copy()
+    result_df["total_trees"] = result_df["total_trees"].fillna(0)
+    has_buildings = result_df.pop("has_buildings").astype(bool)
+    tree_cols = [c for c in (f"tree_count_{b}m" for b in t3_buffer_lst) if c in result_df.columns]
+    result_df.loc[has_buildings, tree_cols] = result_df.loc[has_buildings, tree_cols].fillna(0)
+    return result_df
 
 
 def process_data(
@@ -474,6 +507,9 @@ def process_data(
     rule_distance: str = "euclidean",
 ) -> pd.DataFrame:
     """Run the full merge pipeline and write database/T3_30_300_spectral.parquet.
+
+    With a DGGS the tables get the grid suffix (T3_30_300_spectral_h3_9.parquet,
+    T3_30_300_buildings_h3_9.parquet) so they sit beside the census-unit run.
 
     Produces one row per geo_level unit with total trees, mean T3 tree counts
     per buffer, canopy cover, park distances, the % of buildings meeting each
@@ -498,13 +534,12 @@ def process_data(
     compute_compliance(
         sedona, cfg, geo_level, sub_geo_level, t3_buffer_lst, tables["t30_buildings_buffers"],
         rule_t3_buffer=rule_t3_buffer, rule_t30_buffer=rule_t30_buffer, rule_distance=rule_distance,
+        out_name=unit_output_name("T3_30_300_buildings", dggs, dggs_resolution),
     )
     result_sdf = merge_all(sedona, geo_level, tables["t30_buildings_buffers"], tables["visibility_buffers"])
 
-    result_df = result_sdf.toPandas()
+    result_df = fill_unit_counts(result_sdf.toPandas(), t3_buffer_lst)
     tree_cols = [f"tree_count_{b}m" for b in t3_buffer_lst]
-    # units with no tree at all are absent from Tree_count's CSVs
-    result_df[tree_cols + ["total_trees"]] = result_df[tree_cols + ["total_trees"]].fillna(0)
 
     leading = [geo_level, "total_trees"] + tree_cols + ["canopy_cover"] + [
         f"building_canopy_cover_{b}m" for b in tables["t30_buildings_buffers"]
@@ -515,7 +550,7 @@ def process_data(
     result_df = result_df[ordered]
 
     db_dir = Path(cfg.output.base_dir) / "database"
-    result_df.to_parquet(db_dir / "T3_30_300_spectral.parquet", index=False)
+    result_df.to_parquet(db_dir / f"{unit_output_name('T3_30_300_spectral', dggs, dggs_resolution)}.parquet", index=False)
 
     logger.info("Merge pipeline completed")
     return result_df

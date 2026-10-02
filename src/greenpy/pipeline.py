@@ -191,9 +191,9 @@ def load_tables(
 def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
     """Convert raw inputs to parquet, applying canonical column renames.
 
-    Layers whose data path is "osm" are fetched from OpenStreetMap inside the
-    census-boundary extent instead of read from file. The census boundaries are
-    loaded first because they define the OSM query area.
+    Layers whose data path is "osm" (or "overture" for buildings and parks)
+    are fetched inside the census-boundary extent instead of read from file.
+    The census boundaries are loaded first because they define the query area.
     """
     logger.info("Setting up parquet cache from raw input files")
     col = cfg.columns
@@ -203,9 +203,10 @@ def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
     census_gdf.to_parquet(db_dir / "census_boundaries.parquet", index=False)
 
     osm_layers = [s for s in ("buildings", "parks_sites", "parks_access", "roads") if is_osm(getattr(cfg.data, s))]
-    if osm_layers:
+    if osm_layers or is_overture(cfg.data.parks_sites):
         from . import osm
-        logger.info(f"Layers sourced from OSM: {osm_layers} (fetched once, then cached as parquet)")
+        if osm_layers:
+            logger.info(f"Layers sourced from OSM: {osm_layers} (fetched once, then cached as parquet)")
         # buffered so the road network can route to parks just outside the study area
         query_polygon = osm.build_query_polygon(census_gdf, cfg.osm.fetch_buffer)
 
@@ -236,6 +237,9 @@ def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
 
     if is_osm(cfg.data.parks_sites):
         parks_sites_gdf = osm.fetch_osm_parks(query_polygon, cfg.osm.park_tags, cfg.osm.exclude_private, cfg.crs)
+    elif is_overture(cfg.data.parks_sites):
+        from . import overture
+        parks_sites_gdf = overture.fetch_overture_parks(query_polygon, cfg.overture.park_land_use, cfg.crs)
     else:
         parks_sites_gdf = _read_vector(cfg.data.parks_sites).to_crs(cfg.crs)
         parks_sites_gdf = parks_sites_gdf.rename(columns={col.park_id: "park_id"})
@@ -305,6 +309,18 @@ def build_buildings_overlay(db_dir: Path, cfg: GreenPyConfig) -> None:
     buildings_gdf = gpd.read_parquet(db_dir / "buildings.parquet")
     census_gdf = gpd.read_parquet(db_dir / "census_boundaries.parquet")
     _build_overlay(buildings_gdf, census_gdf, cfg.columns.geo_levels, db_dir / "census_buildings_overlay.parquet")
+
+
+# Modules whose outputs are keyed by the sub-geo unit; in DGGS mode they are
+# written under grid-suffixed names so grid and census-unit results coexist
+UNIT_LEVEL_OUTPUTS = ("T30", "Tree_count", "T3_30_300_spectral", "T3_30_300_buildings")
+
+
+def unit_output_name(name: str, dggs: str | None = None, dggs_resolution: int | None = None) -> str:
+    """Output name for a unit-level module: `name`, or `name_<grid column>` (e.g. T30_h3_9) in DGGS mode."""
+    if dggs is None or name not in UNIT_LEVEL_OUTPUTS:
+        return name
+    return f"{name}_{get_system(dggs).column_name(dggs_resolution)}"
 
 
 def ensure_dggs_files(

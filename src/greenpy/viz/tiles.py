@@ -16,7 +16,7 @@ from .store import UNIT_SIMPLIFY, connect
 EXTENT = 4096
 BUFFER = 64
 HALF_WORLD = 20037508.342789244
-MIN_ZOOM = {"buildings": 14, "trees": 14}
+MIN_ZOOM = {"buildings": 14, "trees": 14, "parks": 0}
 
 
 def tile_bounds(z: int, x: int, y: int) -> tuple[float, float, float, float]:
@@ -52,7 +52,7 @@ class TileStore:
         return {m["name"] for m in self.meta["layers"][layer]["metrics"]}
 
     def has_layer(self, layer: str) -> bool:
-        return layer in self.meta["layers"] or (layer == "trees" and self.meta.get("trees") is not None)
+        return layer in self.meta["layers"] or (layer in ("trees", "parks") and self.meta.get(layer) is not None)
 
     def tile(self, layer: str, metric: str | None, z: int, x: int, y: int) -> bytes | None:
         """Gzipped MVT bytes, or None for an empty tile. Raises KeyError for unknown layers/metrics."""
@@ -69,10 +69,11 @@ class TileStore:
         return data
 
     def _render(self, layer: str, metric: str | None, z: int, x: int, y: int) -> bytes | None:
-        if layer == "trees":
-            if self.meta.get("trees") is None:
+        if layer in ("trees", "parks"):
+            if self.meta.get(layer) is None:
                 raise KeyError(layer)
-            table, geom, props = "trees", "geom", ["radius_m", "height"]
+            table, geom = layer, "geom"
+            props = ["radius_m", "height"] if layer == "trees" else ["id", "name", "area_ha", "used"]
         else:
             info = self.meta["layers"][layer]
             table = info["table"]

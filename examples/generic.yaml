@@ -122,6 +122,11 @@ columns:
     - district_code
     - tract_code
 
+  # Optional, for `greenpy viz`: display names for the levels, and the
+  # census_boundaries column holding each unit's name
+  # geo_level_labels: {district_code: District, tract_code: Tract}
+  # geo_level_names: {district_code: district_name, tract_code: tract_name}
+
 output:
   base_dir: /path/to/output/
 

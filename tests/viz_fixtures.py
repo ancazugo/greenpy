@@ -12,7 +12,7 @@ CRS = "EPSG:27700"
 X0, Y0 = 530000, 180000
 
 
-def make_config(base: Path, trees: Path | None = None) -> GreenPyConfig:
+def make_config(base: Path, trees: Path | None = None, **columns) -> GreenPyConfig:
     return GreenPyConfig(
         study_area_name="Testville",
         crs=CRS,
@@ -20,8 +20,9 @@ def make_config(base: Path, trees: Path | None = None) -> GreenPyConfig:
             buildings="unused", parks_sites="unused", parks_access="unused", roads="unused",
             census_boundaries="unused", trees_dir=str(trees) if trees else None,
         ),
-        columns=ColumnMapping(building_id="building_id", geo_levels=["DIST", "TRACT"]),
+        columns=ColumnMapping(building_id="building_id", geo_levels=["DIST", "TRACT"], **columns),
         output=OutputPaths(base_dir=str(base)),
+        park_min_area_ha=0.5,
     )
 
 
@@ -31,7 +32,8 @@ def make_outputs(base: Path, merged: bool = False) -> None:
     Module CSVs: T3 at 10 m (omitting B0) and 50 m, T300, T30 (per tract)
     and Tree_count (omitting T0).
     With merged=True also the Merge parquets T3_50m, T3_30_300_buildings and
-    T3_30_300_spectral (at DIST).
+    T3_30_300_spectral (at DIST), and parks P0 (1 ha, counted for 300) and P1
+    (0.25 ha, below park_min_area_ha).
     """
     db = base / "database"
     db.mkdir(parents=True)
@@ -43,11 +45,16 @@ def make_outputs(base: Path, merged: bool = False) -> None:
     )
     buildings.to_parquet(db / "buildings.parquet", index=False)
     census = gpd.GeoDataFrame(
-        {"DIST": ["D0", "D0"], "TRACT": ["T0", "T1"]},
+        {"DIST": ["D0", "D0"], "TRACT": ["T0", "T1"], "TRACT_NAME": ["Northfield", "Southbank"]},
         geometry=[shapely.box(X0, Y0, X0 + 100, Y0 + 100), shapely.box(X0 + 100, Y0, X0 + 200, Y0 + 100)],
         crs=CRS,
     )
     census.to_parquet(db / "census_boundaries.parquet", index=False)
+    gpd.GeoDataFrame(
+        {"park_id": ["P0", "P1"], "name": ["Big Park", None]},
+        geometry=[shapely.box(X0 + 20, Y0 + 20, X0 + 120, Y0 + 120), shapely.box(X0 + 150, Y0 + 20, X0 + 200, Y0 + 70)],
+        crs=CRS,
+    ).to_parquet(db / "parks_sites.parquet", index=False)
     pd.DataFrame({"building_id": [0, 1, 2], "DIST": ["D0"] * 3, "TRACT": ["T0", "T0", "T1"]}).to_parquet(
         db / "census_buildings_overlay.parquet", index=False
     )
@@ -73,6 +80,8 @@ def make_outputs(base: Path, merged: bool = False) -> None:
         pd.DataFrame({"building_id": [0, 1, 2], "tree_count_50m": [2, 3, 9]}).to_parquet(db / "T3_50m.parquet", index=False)
         pd.DataFrame({
             "building_id": [0, 1, 2], "DIST": ["D0"] * 3, "TRACT": ["T0", "T0", "T1"],
+            # the values the rule tested, as Merge writes them beside the flags
+            "tree_count_50m": [2, 3, 9], "distance_euclidean": [100.0, 350.0, 80.0], "canopy_cover": [12.5, 12.5, 41.0],
             "meets_3": [False, True, True], "meets_30": [False, False, True],
             "meets_300": [True, False, True], "meets_3_30_300": [False, False, True],
         }).astype({f: "boolean" for f in ("meets_3", "meets_30", "meets_300", "meets_3_30_300")}).to_parquet(

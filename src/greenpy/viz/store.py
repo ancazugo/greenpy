@@ -17,9 +17,11 @@ from pathlib import Path
 import duckdb
 from loguru import logger
 
-from .catalog import BUILDING_KEY, Catalog, Source, UnitLayer, describe
+from .catalog import BUILDING_KEY, CRITERIA_MET, RULE_FLAGS, Catalog, Source, UnitLayer, describe
 
-STORE_VERSION = 3
+STORE_VERSION = 5
+# building columns holding a census unit's name, e.g. "name:ADM3_code"
+NAME_PREFIX = "name:"
 N_CLASSES = 7
 N_BINS = 40
 # (max zoom, simplification tolerance in Web Mercator metres) for unit geometry columns
@@ -125,7 +127,15 @@ def _zero_fill(con: duckdb.DuckDBPyConnection, table: str, sources: list[Source]
 
 
 def _join_metrics(views: list[tuple[str, list[str]]]) -> tuple[str, str]:
-    sel = "".join(f", {v}.{_ident(m)}" for v, cols in views for m in cols)
+    """Select every metric once; a metric several sources provide takes the first non-null, in source order."""
+    by_metric: dict[str, list[str]] = {}
+    for v, cols in views:
+        for m in cols:
+            by_metric.setdefault(m, []).append(f"{v}.{_ident(m)}")
+    sel = "".join(
+        f", {refs[0]} AS {_ident(m)}" if len(refs) == 1 else f", COALESCE({', '.join(refs)}) AS {_ident(m)}"
+        for m, refs in by_metric.items()
+    )
     joins = "".join(f" LEFT JOIN {v} ON {v}.k = g.id" for v, _ in views)
     return sel, joins
 
@@ -141,6 +151,11 @@ def _build_buildings(con: duckdb.DuckDBPyConnection, catalog: Catalog) -> list[s
         levels = [u.name for u in catalog.unit_layers if u.overlay == overlay]
         sel += "".join(f", CAST(o.{_ident(c)} AS VARCHAR) AS {_ident(c)}" for c in levels)
         joins += f" LEFT JOIN read_parquet({_sql_str(overlay)}) o ON CAST(o.{BUILDING_KEY} AS VARCHAR) = g.id"
+        # and their names, when columns.geo_level_names says where they are
+        for i, u in enumerate(u for u in catalog.unit_layers if u.overlay == overlay and u.name_col):
+            names = f"(SELECT DISTINCT CAST({_ident(u.name)} AS VARCHAR) AS c, CAST({_ident(u.name_col)} AS VARCHAR) AS n FROM read_parquet({_sql_str(u.boundaries)}))"
+            sel += f", nm{i}.n AS {_ident(NAME_PREFIX + u.name)}"
+            joins += f" LEFT JOIN {names} nm{i} ON nm{i}.c = CAST(o.{_ident(u.name)} AS VARCHAR)"
     con.execute(f"""
         CREATE TABLE buildings AS
         SELECT g.id, g.geom, {_BBOX.replace('geom', 'g.geom')}{sel}
@@ -152,9 +167,40 @@ def _build_buildings(con: duckdb.DuckDBPyConnection, catalog: Catalog) -> list[s
             con, "buildings", catalog.building_sources,
             f"SELECT CAST({BUILDING_KEY} AS VARCHAR) AS id, * FROM read_parquet({_sql_str(overlay)})", levels,
         )
+    metrics = [m for _, cols in views for m in cols]
+    criteria = [f for f in RULE_FLAGS[:3] if f in metrics]
+    if len(criteria) == 3:
+        # how many of 3 / 30 / 300 a building meets, so the combined rule can be shown as a gradient
+        con.execute(f"ALTER TABLE buildings ADD COLUMN {CRITERIA_MET} INTEGER")
+        con.execute(f"UPDATE buildings SET {CRITERIA_MET} = " + " + ".join(f"CAST({_ident(f)} AS INTEGER)" for f in criteria))
+        metrics.append(CRITERIA_MET)
     _hilbert_order(con, "buildings")
     con.execute("CREATE INDEX buildings_id ON buildings (id)")
-    return [m for _, cols in views for m in cols]
+    return metrics
+
+
+def _build_parks(con: duckdb.DuckDBPyConnection, catalog: Catalog) -> dict:
+    """Park polygons in Web Mercator, flagged `used` when T300 counts them (park_min_area_ha)."""
+    parks = catalog.parks
+    rel = f"read_parquet({_sql_str(parks.path)})"
+    crs = _source_crs(con, rel, "geometry", catalog.crs)
+    cols = {c.lower(): c for c in con.sql(f"SELECT * FROM {rel} LIMIT 0").columns}
+    name = f"CAST({_ident(cols['name'])} AS VARCHAR)" if "name" in cols else "CAST(NULL AS VARCHAR)"
+    pid = f"CAST({_ident(cols['park_id'])} AS VARCHAR)" if "park_id" in cols else "CAST(row_number() OVER () AS VARCHAR)"
+    # areas in the study-area CRS (metres), as T300's filter measures them
+    area = f"ST_Area(ST_Transform(geometry, {_sql_str(crs)}, {_sql_str(catalog.crs)}, always_xy := true)) / 10000"
+    min_ha = parks.min_area_ha or 0
+    con.execute(f"""
+        CREATE TABLE parks AS
+        SELECT id, name, round(area_ha, 2) AS area_ha, area_ha >= {min_ha} AS used, geom, {_BBOX}
+        FROM (
+            SELECT {pid} AS id, {name} AS name, {area} AS area_ha, {_to_mercator('geometry', crs)} AS geom
+            FROM {rel} WHERE geometry IS NOT NULL AND ST_Dimension(geometry) = 2
+        )
+    """)
+    _hilbert_order(con, "parks")
+    n, used = con.execute("SELECT count(*), count(*) FILTER (used) FROM parks").fetchone()
+    return {"count": n, "used": used, "min_area_ha": parks.min_area_ha}
 
 
 def _build_units(con: duckdb.DuckDBPyConnection, catalog: Catalog, layer: UnitLayer, building_metrics: list[str]) -> list[str]:
@@ -165,14 +211,16 @@ def _build_units(con: duckdb.DuckDBPyConnection, catalog: Catalog, layer: UnitLa
     n_rows, n_codes = con.execute(f"SELECT count(*), count(DISTINCT {code}) FROM {rel}").fetchone()
     # coarser census levels are dissolved from the finest-level polygons
     geom = "ST_Union_Agg(geometry)" if n_rows != n_codes else "any_value(geometry)"
+    boundary_cols = con.sql(f"SELECT * FROM {rel} LIMIT 0").columns
+    name = f", any_value(CAST({_ident(layer.name_col)} AS VARCHAR)) AS name" if layer.name_col in boundary_cols else ""
     con.execute(f"""
         CREATE TEMP TABLE {table}_geom AS
-        SELECT CAST({code} AS VARCHAR) AS id, {_to_mercator(geom, crs)} AS geom
+        SELECT CAST({code} AS VARCHAR) AS id, {_to_mercator(geom, crs)} AS geom{name}
         FROM {rel} WHERE {code} IS NOT NULL GROUP BY {code}
     """)
 
     views = _metric_views(con, layer.sources, f"{table}_m")
-    metrics = [m for _, cols in views for m in cols]
+    metrics = list(dict.fromkeys(m for _, cols in views for m in cols))
     if layer.overlay is not None and not layer.merged and building_metrics:
         # averages of the per-building metrics; Merge's own table already has its means
         aggs = ["count(*) AS n_buildings"]
@@ -197,10 +245,9 @@ def _build_units(con: duckdb.DuckDBPyConnection, catalog: Catalog, layer: UnitLa
     )
     con.execute(f"""
         CREATE TABLE {table} AS
-        SELECT g.id, g.geom{simplified}, {_BBOX.replace('geom', 'g.geom')}{sel}
+        SELECT g.id{', g.name' if name else ''}, g.geom{simplified}, {_BBOX.replace('geom', 'g.geom')}{sel}
         FROM {table}_geom g {joins}
     """)
-    boundary_cols = con.sql(f"SELECT * FROM {rel} LIMIT 0").columns
     levels = [c for c in catalog.census_levels if c in boundary_cols]
     _zero_fill(con, table, layer.sources, f"SELECT CAST({code} AS VARCHAR) AS id, * FROM {rel}", levels)
     _hilbert_order(con, table)
@@ -289,10 +336,21 @@ def metric_stats(con: duckdb.DuckDBPyConnection, table: str, metric: str) -> dic
     hist = [0] * n_bins
     for b, c in rows:
         hist[b] = c
+    quantiles = sorted(set(round(q, 4) for q in qs))
+    if sum(q > vmin for q in quantiles) < 3:
+        # one value (typically 0) is so common that the quantile breaks collapse onto
+        # it: it keeps its own class and the remaining classes split the values above
+        # it, starting at the smallest of them so they never share the tied value's colour
+        rest_min, rest_qs = con.execute(f"""
+            SELECT min({col}), quantile_cont({col}, {[i / (N_CLASSES - 2) for i in range(1, N_CLASSES - 2)]})
+            FROM {table} WHERE {finite} AND {col} > {vmin}
+        """).fetchone()
+        if rest_min is not None:
+            quantiles = sorted(set(quantiles) | {round(q, 4) for q in [rest_min, *rest_qs]})
     stats |= {
         "integer": integer,
         "domain": [lo, hi],
-        "quantile": sorted(set(round(q, 4) for q in qs)),
+        "quantile": quantiles,
         "equal": [round(lo + (hi - lo) * i / N_CLASSES, 4) for i in range(1, N_CLASSES)],
         "hist": hist,
     }
@@ -326,6 +384,11 @@ def build_store(catalog: Catalog, path: Path, include_trees: bool = True) -> Non
             metrics = _build_units(con, catalog, layer, building_metrics)
             layers[layer.name] = {"label": layer.label, "table": unit_table(layer.name), "metrics": metrics}
 
+        parks = None
+        if catalog.parks:
+            logger.info("viz: loading parks")
+            parks = _build_parks(con, catalog)
+
         trees = None
         if include_trees and catalog.trees:
             logger.info(f"viz: loading trees from {len(catalog.trees.paths)} file(s)")
@@ -340,16 +403,20 @@ def build_store(catalog: Catalog, path: Path, include_trees: bool = True) -> Non
         # per layer: Merge's unit table reuses building metric names (tree_count_50m, ...)
         module_of = {"buildings": {m: s.module for s in catalog.building_sources for m in s.columns.values()}}
         for layer in catalog.unit_layers:
-            module_of[layer.name] = {m: s.module for s in layer.sources for m in s.columns.values()}
+            module_of[layer.name] = {}
+            for s in layer.sources:  # the first source of a metric (Merge's table) names its module
+                for m in s.columns.values():
+                    module_of[layer.name].setdefault(m, s.module)
         meta = {
             "fingerprint": fingerprint(catalog, include_trees),
             "study_area_name": catalog.study_area_name,
             "bounds": _lonlat_bounds(con),
             "layers": {
-                name: info | {"metrics": [asdict(describe(m, module_of[name].get(m, ""))) for m in info["metrics"]]}
+                name: info | {"metrics": [_metric_meta(m, module_of[name].get(m, ""), catalog, name, info["metrics"]) for m in info["metrics"]]}
                 for name, info in layers.items()
             },
             "trees": trees,
+            "parks": parks,
         }
         con.execute("CREATE TABLE meta (key VARCHAR PRIMARY KEY, value JSON)")
         con.executemany("INSERT INTO meta VALUES (?, ?)", [[k, json.dumps(v)] for k, v in meta.items()])
@@ -358,6 +425,13 @@ def build_store(catalog: Catalog, path: Path, include_trees: bool = True) -> Non
         con.close()
     os.replace(tmp, path)
     tmp.with_suffix(".duckdb.wal").unlink(missing_ok=True)
+
+
+def _metric_meta(metric: str, module: str, catalog: Catalog, layer: str, layer_metrics: list[str]) -> dict:
+    meta = asdict(describe(metric, module))
+    if layer == "buildings" and catalog.rule_gradients.get(metric) in layer_metrics:
+        meta["gradient"] = catalog.rule_gradients[metric]
+    return meta
 
 
 def read_meta(con: duckdb.DuckDBPyConnection) -> dict:

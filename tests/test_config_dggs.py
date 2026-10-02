@@ -61,3 +61,21 @@ def test_deprecated_h3_resolution_maps_to_dggs(tmp_path):
 def test_deprecated_alias_cannot_combine(tmp_path):
     with pytest.raises(ValueError, match="cannot be combined"):
         _load(tmp_path, h3_resolution=9, dggs="h3", dggs_resolution=9)
+
+
+def test_unit_output_names_get_the_grid_suffix():
+    from greenpy.pipeline import unit_output_name
+
+    assert unit_output_name("T30") == "T30"
+    assert unit_output_name("T30", "h3", 9) == "T30_h3_9"
+    assert unit_output_name("T3_30_300_spectral", "s2", 17) == "T3_30_300_spectral_s2_17"
+    # per-building outputs keep their names: Merge aggregates them through the grid's buildings overlay
+    assert unit_output_name("T300", "h3", 9) == "T300"
+
+
+def test_geo_level_labels_and_names(tmp_path):
+    cols = {**MINIMAL["columns"], "geo_level_labels": {"tract": "Tract"}, "geo_level_names": {"tract": "tract_name"}}
+    cfg = _load(tmp_path, columns=cols)
+    assert cfg.columns.geo_level_labels == {"tract": "Tract"} and cfg.columns.geo_level_names == {"tract": "tract_name"}
+    with pytest.raises(ValueError, match="not in columns.geo_levels"):
+        _load(tmp_path, columns={**MINIMAL["columns"], "geo_level_labels": {"ward": "Ward"}})

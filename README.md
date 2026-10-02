@@ -150,6 +150,7 @@ greenpy viz -c config.yaml                    # interactive map, see "Visualisin
 Useful options:
 
 - `--geo_level` / `--sub_geo_level` — which levels of `columns.geo_levels` to iterate over / aggregate to (defaults: coarsest / finest); Merge's `--geo_level` defaults to the second-finest level instead
+- `--dggs h3|s2|geohash|a5|rhealpix --dggs_resolution N` — aggregate to grid cells instead of the finest census level (also settable as `dggs`/`dggs_resolution` in the config). Grid runs sit beside census-unit runs: T30, Tree_count and Merge write grid-suffixed outputs (`T30_h3_9/`, `database/T3_30_300_spectral_h3_9.parquet`), and the per-building modules (T3, T300, …) need not be re-run — Merge aggregates them through the grid's buildings overlay. With a grid, the rule's "30" uses each building's cell canopy. To add H3 res 9 to an existing run: `-p T30`, `-p Tree_count` and `-p Merge`, each with `--dggs h3 --dggs_resolution 9`
 - `--geo_code CODE` — process a single geography instead of all
 - `--parallel --n_workers 4` — process geo codes concurrently (per-geo Spark views are isolated, so results match sequential runs)
 - `--no-overwrite` — skip geo codes whose output CSV already exists (resume an interrupted run)
@@ -219,7 +220,7 @@ Requirements and behaviour:
 
 ### Merge and the 3-30-300 rule
 
-`Merge` accepts `--t3_buffers` (default `10 25 50 75 100`) and combines whichever T3 buffer runs exist; Spectral, T30_buildings and Visibility outputs are included only if present. It aggregates to `--geo_level`, which for Merge defaults to the **second-finest** level of `columns.geo_levels` (the finest with a DGGS), reading sub-geo results at `--sub_geo_level` (default: finest).
+`Merge` accepts `--t3_buffers`, repeated once per buffer (e.g. `--t3_buffers 50 --t3_buffers 100`; default 10, 25, 50, 75 and 100), and combines whichever T3 buffer runs exist; Spectral, T30_buildings and Visibility outputs are included only if present. It aggregates to `--geo_level`, which for Merge defaults to the **second-finest** level of `columns.geo_levels` (the finest with a DGGS), reading sub-geo results at `--sub_geo_level` (default: finest).
 
 Per unit it reports means — `tree_count_<b>m`, `canopy_cover` (area-weighted), `park_distance_manhattan` (road network) and `park_distance_euclidean`, plus `building_canopy_cover_<b>m` and `visible_trees_<b>m` when available — and `total_trees`.
 
@@ -243,9 +244,10 @@ Each building belongs to exactly one census unit — the one containing its repr
 greenpy viz -c config.yaml            # opens http://localhost:8765
 ```
 
-- **Buildings** are coloured by any per-building metric (T3 tree counts, park distances, T30_buildings canopy, visible trees and, after Merge, the `meets_*` rule flags). Choose quantile, equal-interval or **rule** classes; the last uses diverging colours centred on the 3-30-300 threshold (3 trees, 30 %, 300 m).
-- **Units** (every census level, plus any DGGS grid already built) can be drawn as outlines over the buildings or filled with a unit metric: Merge's table at its level, T30/Tree_count/Spectral at the sub-geo level, and averages of the building metrics at every level.
-- **Trees** from `data.trees_dir` are drawn to scale (crown radius from the area column or polygon area) or as dots when only points are available.
+- **Buildings** are coloured by any per-building metric (T3 tree counts, park distances, T30_buildings canopy, visible trees and, after Merge, the `meets_*` rule flags). Choose quantile, equal-interval or **rule** classes; the last uses diverging colours (red = fails, blue = meets) centred on the 3-30-300 threshold (3 trees, 30 %, 300 m). A rule flag is drawn as a **gradient of the value it tests** — trees within the rule buffer, the canopy the rule used, the park distance, or for the combined rule the number of criteria met (0–3) — with its pass/fail counts in the legend; switch to plain pass/fail there.
+- **Units** (every census level, plus any DGGS grid already built, e.g. "H3 res 9") can be filled with a unit metric — Merge's table at its level, T30/Tree_count/Spectral at the sub-geo level, and averages of the building metrics at every level — or outlined. **Boundaries** toggles outlines of any number of levels at once, e.g. ward borders over an H3 fill. Set `columns.geo_level_labels` / `geo_level_names` to show levels and units by name.
+- **Parks** shows the green spaces T300 counts (solid; at least `park_min_area_ha`) and the smaller ignored ones (dashed); click one for its name and area.
+- **Trees** from `data.trees_dir` are drawn to scale (crown radius from the area column or polygon area) or as dots when only points are available. Green is reserved for trees; metric ramps use blues, red–blue and orange–brown.
 - Drag across the legend histogram to show only a value range; click a feature for all of its values.
 - Basemaps: none, OpenFreeMap, CARTO, OpenStreetMap, or Sentinel-2 imagery (EOX, non-commercial).
 
@@ -264,8 +266,10 @@ The server listens on `127.0.0.1` only. On a remote machine, forward the port (`
 ├── Tree_count/    Tree_count_<code>.csv
 ├── Visibility/    Visibility_<code>_<buffer>m.csv
 ├── Spectral/      Spectral_<code>.csv
+├── T30_h3_9/, Tree_count_h3_9/   same, per grid cell (runs with --dggs h3 --dggs_resolution 9)
 └── database/      parquet cache + consolidated outputs
     ├── T3_30_300_buildings.parquet  ← per-building 3-30-300 evaluation
     ├── T3_30_300_spectral.parquet   ← final merged table
+    ├── h3_boundaries_res9.parquet   ← grid cells (+ T3_30_300_*_h3_9.parquet from a grid Merge)
     └── viz.duckdb                   ← map store built by `greenpy viz`
 ```

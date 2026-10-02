@@ -38,6 +38,7 @@ def _catalog_payload(store: TileStore) -> dict:
             for name, info in meta["layers"].items()
         },
         "trees": meta.get("trees"),
+        "parks": meta.get("parks"),
         "min_zoom": MIN_ZOOM,
     }
 

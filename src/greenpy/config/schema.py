@@ -65,6 +65,10 @@ class ColumnMapping:
     # Census geographies — ordered coarsest → finest
     # e.g. ["RGN22CD", "LAD22CD", "LSOA21CD", "OA21CD"]
     geo_levels: list[str] = field(default_factory=list)
+    # Optional display names for the levels (e.g. {ADM3_code: Ward}) and, per level,
+    # a census_boundaries column holding each unit's name (e.g. {ADM3_code: ADM3_name}) — used by the viz
+    geo_level_labels: dict[str, str] = field(default_factory=dict)
+    geo_level_names: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -114,6 +118,16 @@ class OpenBuildingsConfig:
 
     # Min detection confidence to keep (dataset values roughly in [0.5, 1))
     confidence_threshold: float = 0.7
+
+
+@dataclass
+class OvertureConfig:
+    """Options for layers sourced from Overture Maps (buildings or parks_sites set to "overture")."""
+
+    # land_use subtypes or classes kept as parks (an entry matches either). Protected
+    # areas (national parks, reserves) are left out by default: they are usually
+    # fenced or ticketed rather than open neighbourhood green space
+    park_land_use: list[str] = field(default_factory=lambda: ["park", "recreation_ground"])
 
 
 @dataclass
@@ -171,5 +185,7 @@ class GreenPyConfig:
     osm: OSMConfig = field(default_factory=OSMConfig)
     # Options for buildings set to "open_buildings"
     open_buildings: OpenBuildingsConfig = field(default_factory=OpenBuildingsConfig)
+    # Options for layers set to "overture"
+    overture: OvertureConfig = field(default_factory=OvertureConfig)
     # Options for the Trees process
     tree_segmentation: TreeSegmentationConfig = field(default_factory=TreeSegmentationConfig)

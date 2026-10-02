@@ -9,12 +9,14 @@ from .schema import (
     DataPaths,
     OSMConfig,
     OpenBuildingsConfig,
+    OvertureConfig,
     OutputPaths,
     TileSystemConfig,
     TreeSegmentationConfig,
     building_source,
     is_open_buildings,
     is_osm,
+    is_overture,
 )
 
 # osmnx 2.x network types
@@ -40,6 +42,7 @@ def load_config(path: str | Path) -> GreenPyConfig:
     _validate_osm_sources(data_raw, columns_raw)
     osm_cfg = _parse_osm_section(raw.get("osm") or {})
     open_buildings_cfg = _parse_open_buildings_section(raw.get("open_buildings") or {})
+    overture_cfg = _parse_overture_section(raw.get("overture") or {})
     tree_seg_cfg = _parse_tree_segmentation_section(raw.get("tree_segmentation") or {})
 
     output_raw = raw["output"]
@@ -93,6 +96,8 @@ def load_config(path: str | Path) -> GreenPyConfig:
             tree_id_col=columns_raw.get("tree_id_col", "treeID"),
             tree_layer=columns_raw.get("tree_layer", "trees"),
             geo_levels=columns_raw["geo_levels"],
+            geo_level_labels=_level_mapping(columns_raw, "geo_level_labels"),
+            geo_level_names=_level_mapping(columns_raw, "geo_level_names"),
         ),
         output=OutputPaths(base_dir=output_raw["base_dir"]),
         gee_project=raw.get("gee_project"),
@@ -105,6 +110,7 @@ def load_config(path: str | Path) -> GreenPyConfig:
             tile_name_pattern=tile_raw.get("tile_name_pattern"),
         ),
         osm=osm_cfg,
+        overture=overture_cfg,
         open_buildings=open_buildings_cfg,
         tree_segmentation=tree_seg_cfg,
     )
@@ -149,8 +155,14 @@ def _validate_osm_sources(data_raw: dict, columns_raw: dict) -> None:
     """Check remote-sourced layers are consistent with the rest of the config."""
     for layer in ("parks_sites", "parks_access", "roads", "road_nodes", "census_boundaries"):
         val = data_raw.get(layer)
-        if isinstance(val, str) and val.strip().lower() in ("overture", "open_buildings"):
-            raise ValueError(f"data.{layer} cannot be '{val}' — 'overture' and 'open_buildings' are valid only for data.buildings")
+        if not isinstance(val, str):
+            continue
+        source = val.strip().lower()
+        if source == "open_buildings" or (source == "overture" and layer != "parks_sites"):
+            raise ValueError(
+                f"data.{layer} cannot be '{val}' — 'open_buildings' is valid only for data.buildings, "
+                "'overture' only for data.buildings and data.parks_sites"
+            )
     if is_open_buildings(data_raw["buildings"]) and columns_raw.get("building_height_col"):
         logger.warning(
             "Google Open Buildings has no height attribute — columns.building_height_col is ignored "
@@ -165,6 +177,12 @@ def _validate_osm_sources(data_raw: dict, columns_raw: dict) -> None:
         raise ValueError("data.census_boundaries cannot be 'osm' — it defines the study area and must be a file")
     if is_osm(data_raw["roads"]) and data_raw.get("road_nodes"):
         raise ValueError("data.road_nodes cannot be combined with roads: osm — nodes come from the OSM network")
+    if is_overture(data_raw["parks_sites"]):
+        if columns_raw.get("park_function_col") or columns_raw.get("park_function_value"):
+            raise ValueError(
+                "columns.park_function_col/value cannot be combined with parks_sites: overture — "
+                "Overture parks are already filtered by land use (see overture.park_land_use)"
+            )
     if is_osm(data_raw["parks_sites"]):
         if columns_raw.get("park_function_col") or columns_raw.get("park_function_value"):
             raise ValueError(
@@ -204,6 +222,16 @@ def _parse_osm_section(osm_raw: dict) -> OSMConfig:
     )
 
 
+def _parse_overture_section(ov_raw: dict) -> OvertureConfig:
+    unknown = set(ov_raw) - {"park_land_use"}
+    if unknown:
+        raise ValueError(f"Unknown overture keys {sorted(unknown)}; expected ['park_land_use']")
+    park_land_use = ov_raw.get("park_land_use", OvertureConfig().park_land_use)
+    if not (isinstance(park_land_use, list) and park_land_use and all(isinstance(v, str) for v in park_land_use)):
+        raise ValueError("overture.park_land_use must be a non-empty list of Overture land_use subtypes/classes")
+    return OvertureConfig(park_land_use=park_land_use)
+
+
 def _parse_open_buildings_section(ob_raw: dict) -> OpenBuildingsConfig:
     confidence_threshold = ob_raw.get("confidence_threshold", 0.7)
     if not isinstance(confidence_threshold, (int, float)) or not (0 <= confidence_threshold < 1):
@@ -211,6 +239,17 @@ def _parse_open_buildings_section(ob_raw: dict) -> OpenBuildingsConfig:
             f"open_buildings.confidence_threshold must be a number in [0, 1), got {confidence_threshold!r}"
         )
     return OpenBuildingsConfig(confidence_threshold=float(confidence_threshold))
+
+
+def _level_mapping(columns_raw: dict, key: str) -> dict[str, str]:
+    """A {geo_level: string} mapping from columns.<key>, checked against columns.geo_levels."""
+    value = columns_raw.get(key) or {}
+    if not isinstance(value, dict) or not all(isinstance(v, str) for v in value.values()):
+        raise ValueError(f"columns.{key} must map geo_levels to strings, e.g. {{ADM3_code: Ward}}")
+    unknown = set(value) - set(columns_raw["geo_levels"])
+    if unknown:
+        raise ValueError(f"columns.{key} has levels not in columns.geo_levels: {sorted(unknown)}")
+    return dict(value)
 
 
 def _parse_chm_overlap(value) -> str:

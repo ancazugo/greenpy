@@ -1,13 +1,16 @@
 /* greenpy viz — map front end. Plain JS on MapLibre GL; all data comes from the local server. */
 "use strict";
 
-// ColorBrewer ramps (7 classes) and the categorical colours for rule flags
+// ColorBrewer ramps (7 classes) and the categorical colours for rule flags. Greens are kept
+// for the tree layer only, so metric colours never read as canopy.
 const RAMPS = {
-  high: ["#ffffcc", "#d9f0a3", "#addd8e", "#78c679", "#41ab5d", "#238443", "#005a32"], // YlGn
-  neutral: ["#edf8fb", "#bfd3e6", "#9ebcda", "#8c96c6", "#8c6bb1", "#88419d", "#6e016b"], // BuPu
-  diverging: ["#8c510a", "#d8b365", "#f6e8c3", "#c7eae5", "#5ab4ac", "#01665e"], // BrBG, fail → pass
+  high: ["#eff3ff", "#c6dbef", "#9ecae1", "#6baed6", "#4292c6", "#2171b5", "#084594"], // Blues
+  neutral: ["#ffffd4", "#fee391", "#fec44f", "#fe9929", "#ec7014", "#cc4c02", "#8c2d04"], // YlOrBr
+  diverging: ["#b2182b", "#ef8a62", "#fddbc7", "#d1e5f0", "#67a9cf", "#2166ac"], // RdBu, fail → pass
 };
-const PASS = "#1a9850", FAIL = "#d73027", NODATA = "#c9c4b8", FILTERED = "#e4dfd3";
+const PASS = "#2166ac", FAIL = "#b2182b", NODATA = "#c9c4b8", FILTERED = "#e4dfd3";
+const PARK = "#7b3294", PARK_LINE = "#542788", GRID_LINE = "#3f4a63";
+const GRID_RE = /^(h3|s2|geohash|a5|rhealpix)_\d+$/;
 const INK = "#1d1d1b", PAPER = "#f4f1ea";
 const MODULE_ORDER = ["Rule", "T3", "T30", "T30_buildings", "T300", "Visibility", "Tree_count", "Merge", "Spectral", "Other"];
 
@@ -38,9 +41,12 @@ const BASEMAPS = {
 const state = {
   catalog: null,
   basemap: "paper",
-  buildings: { visible: true, metric: null, mode: "quantile", stats: null, range: null, hidden: new Set() },
-  units: { visible: false, layer: null, style: "outline", metric: null, mode: "quantile", stats: null, range: null, hidden: new Set() },
+  // view: a rule flag is drawn as a "gradient" of the value it tests, or as plain pass/fail ("flag")
+  buildings: { visible: true, metric: null, mode: "quantile", stats: null, flagStats: null, view: "gradient", range: null, hidden: new Set() },
+  units: { visible: false, layer: null, style: "outline", metric: null, mode: "quantile", stats: null, flagStats: null, view: "gradient", range: null, hidden: new Set() },
   trees: { visible: false },
+  parks: { visible: false },
+  outlines: new Set(), // unit layers drawn as boundary lines, independent of the fill layer
   selected: null, // {layer, id}
 };
 
@@ -48,6 +54,17 @@ const $ = id => document.getElementById(id);
 const metricInfo = (layer, name) => state.catalog.layers[layer].metrics.find(m => m.name === name);
 const tileUrl = (layer, metric) => `${location.origin}/tiles/${encodeURIComponent(layer)}/${encodeURIComponent(metric || "_")}/{z}/{x}/{y}.pbf`;
 const getJSON = url => fetch(url).then(r => (r.ok ? r.json() : null));
+const statsFor = (layer, m) => (m ? getJSON(`/api/stats/${encodeURIComponent(layer)}/${encodeURIComponent(m)}`) : Promise.resolve(null));
+const unitLayerNames = () => Object.keys(state.catalog.layers).filter(k => k !== "buildings");
+
+/** What a target draws: a rule flag in gradient view shows the metric it tests. */
+function drawn(target) {
+  const s = state[target];
+  const layer = target === "buildings" ? "buildings" : s.layer;
+  const base = layer && s.metric ? metricInfo(layer, s.metric) : null;
+  const flag = base && base.kind === "boolean" && base.gradient && s.view === "gradient" ? base : null;
+  return { layer, base, flag, info: flag ? metricInfo(layer, base.gradient) : base };
+}
 
 /* ---------- formatting ---------- */
 
@@ -143,12 +160,18 @@ function baseStyle(key) {
 
 function dataSources() {
   const c = state.catalog;
+  const b = drawn("buildings");
   const sources = {
-    buildings: { type: "vector", tiles: [tileUrl("buildings", state.buildings.metric)], minzoom: c.min_zoom.buildings, maxzoom: 16, promoteId: "id" },
+    buildings: { type: "vector", tiles: [tileUrl("buildings", b.info && b.info.name)], minzoom: c.min_zoom.buildings, maxzoom: 16, promoteId: "id" },
   };
   if (state.units.layer) {
-    sources.units = { type: "vector", tiles: [tileUrl(state.units.layer, state.units.metric)], minzoom: 0, maxzoom: 14, promoteId: "id" };
+    const u = drawn("units");
+    sources.units = { type: "vector", tiles: [tileUrl(state.units.layer, u.info && u.info.name)], minzoom: 0, maxzoom: 14, promoteId: "id" };
   }
+  for (const layer of state.outlines) {
+    if (c.layers[layer]) sources[`outline-${layer}`] = { type: "vector", tiles: [tileUrl(layer, null)], minzoom: 0, maxzoom: 14 };
+  }
+  if (c.parks) sources.parks = { type: "vector", tiles: [tileUrl("parks", null)], minzoom: 0, maxzoom: 14, promoteId: "id" };
   if (c.trees) sources.trees = { type: "vector", tiles: [tileUrl("trees", null)], minzoom: c.min_zoom.trees, maxzoom: 16 };
   return sources;
 }
@@ -171,17 +194,30 @@ function dataLayers() {
       id: "gp-units-fill", type: "fill", source: "units", "source-layer": "features",
       layout: { visibility: vis(u.visible) },
       paint: {
-        "fill-color": fill && u.stats ? colorExpression(metricInfo(u.layer, u.metric), u.stats, u) : PAPER,
+        "fill-color": fill && u.stats ? colorExpression(drawn("units").info, u.stats, u) : PAPER,
         // outline mode keeps an invisible fill so units stay clickable
         "fill-opacity": fill ? ["interpolate", ["linear"], ["zoom"], 12, 0.85, 15, 0.3] : 0,
       },
     });
   }
+  if (state.catalog.parks) {
+    const pv = { visibility: vis(state.parks.visible) };
+    const used = ["==", ["get", "used"], true];
+    layers.push(
+      { id: "gp-parks", type: "fill", source: "parks", "source-layer": "features", layout: pv,
+        paint: { "fill-color": PARK, "fill-opacity": ["case", used, 0.35, 0.08] } },
+      { id: "gp-parks-line", type: "line", source: "parks", "source-layer": "features", layout: pv, filter: used,
+        paint: { "line-color": PARK_LINE, "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.8, 16, 2] } },
+      { id: "gp-parks-small", type: "line", source: "parks", "source-layer": "features", layout: pv, filter: ["!", used],
+        paint: { "line-color": PARK, "line-width": 1, "line-dasharray": [2, 1.5], "line-opacity": 0.8 } },
+    );
+  }
+  const b = drawn("buildings");
   layers.push(
     {
       id: "gp-buildings", type: "fill", source: "buildings", "source-layer": "features",
       layout: { visibility: vis(state.buildings.visible) },
-      paint: { "fill-color": state.buildings.stats ? colorExpression(metricInfo("buildings", state.buildings.metric), state.buildings.stats, state.buildings) : NODATA },
+      paint: { "fill-color": state.buildings.stats && b.info ? colorExpression(b.info, state.buildings.stats, state.buildings) : NODATA },
     },
     {
       id: "gp-buildings-line", type: "line", source: "buildings", "source-layer": "features", minzoom: 16,
@@ -196,6 +232,20 @@ function dataLayers() {
       paint: fill
         ? { "line-color": PAPER, "line-width": 0.8 }
         : { "line-color": INK, "line-width": ["interpolate", ["linear"], ["zoom"], 10, 0.8, 16, 1.6], "line-opacity": 0.85 },
+    });
+  }
+  // boundary lines: census levels solid (coarser = heavier), grids thin and dashed
+  const census = unitLayerNames().filter(k => !GRID_RE.test(k));
+  for (const layer of state.outlines) {
+    if (!state.catalog.layers[layer]) continue;
+    const grid = GRID_RE.test(layer);
+    const rank = census.indexOf(layer);
+    const width = grid ? 0.7 : Math.max(0.8, 2.6 - 0.7 * rank);
+    layers.push({
+      id: `gp-outline-${layer}`, type: "line", source: `outline-${layer}`, "source-layer": "features",
+      paint: grid
+        ? { "line-color": GRID_LINE, "line-width": width, "line-dasharray": [3, 2], "line-opacity": 0.75 }
+        : { "line-color": INK, "line-width": ["interpolate", ["linear"], ["zoom"], 10, width * 0.7, 16, width * 1.3], "line-opacity": 0.85 },
     });
   }
   if (state.catalog.trees) {
@@ -253,15 +303,18 @@ function refreshLayer(which) {
 
 async function setMetric(target, metric) {
   const s = state[target];
-  const layer = target === "buildings" ? "buildings" : s.layer;
   s.metric = metric;
   s.range = null;
   s.hidden = new Set();
-  const info = metricInfo(layer, metric);
-  if (s.mode === "rule" && info.threshold === null) s.mode = "quantile";
-  s.stats = await getJSON(`/api/stats/${encodeURIComponent(layer)}/${encodeURIComponent(metric)}`);
+  const d = drawn(target);
+  // a flag's gradient centres on its threshold, like the park distance in Rule mode
+  if (d.flag) s.mode = "rule";
+  if (s.mode === "rule" && d.info.threshold === null) s.mode = "quantile";
+  // switch tiles before awaiting the stats: tiles requested meanwhile (e.g. while panning)
+  // would otherwise come from the old URL and lack the new metric
   const src = map.getSource(target);
-  if (src) src.setTiles([tileUrl(layer, metric)]);
+  if (src) src.setTiles([tileUrl(d.layer, d.info.name)]);
+  [s.stats, s.flagStats] = await Promise.all([statsFor(d.layer, d.info.name), d.flag ? statsFor(d.layer, d.flag.name) : null]);
   refreshLayer(target === "buildings" ? "buildings" : "units");
   renderLegend();
 }
@@ -292,19 +345,59 @@ function renderLegend() {
   legend.innerHTML = "";
   if (state.buildings.visible && state.buildings.metric) legend.append(legendBlock("buildings"));
   if (state.units.visible && state.units.style === "fill" && state.units.metric) legend.append(legendBlock("units"));
+  if (state.parks.visible && state.catalog.parks) legend.append(parksLegend());
+}
+
+function parksLegend() {
+  const p = state.catalog.parks;
+  const block = document.createElement("div");
+  block.className = "legend-block";
+  const min = p.min_area_ha ? `≥ ${p.min_area_ha} ha` : "all";
+  block.innerHTML = `<h3>Parks</h3><div class="sub">green spaces used for 300 (${min})</div><div class="cats">
+    <div class="cat"><span class="swatch" style="background:${PARK};opacity:.55;border:1.5px solid ${PARK_LINE}"></span><span>Counted for 300</span><span>${p.used.toLocaleString()}</span></div>
+    ${p.count > p.used ? `<div class="cat"><span class="swatch dashed" style="border-color:${PARK}"></span><span>Smaller, ignored</span><span>${(p.count - p.used).toLocaleString()}</span></div>` : ""}
+  </div>`;
+  return block;
+}
+
+function viewControl(target) {
+  const s = state[target];
+  const seg = document.createElement("div");
+  seg.className = "seg";
+  for (const [view, label] of [["gradient", "Gradient"], ["flag", "Pass / fail"]]) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = label;
+    b.className = s.view === view ? "on" : "";
+    b.onclick = () => { s.view = view; setMetric(target, s.metric); saveView(); };
+    seg.append(b);
+  }
+  return seg;
+}
+
+function passFail(stats) {
+  const row = document.createElement("div");
+  row.className = "passfail";
+  const n = stats.true + stats.false;
+  const pct = n ? Math.round((100 * stats.true) / n) : 0;
+  row.innerHTML = `<span class="swatch" style="background:${PASS}"></span><span>${stats.true.toLocaleString()} meet (${pct}%)</span>
+    <span class="swatch" style="background:${FAIL}"></span><span>${stats.false.toLocaleString()} don't</span>`;
+  return row;
 }
 
 function legendBlock(target) {
   const s = state[target];
-  const layer = target === "buildings" ? "buildings" : s.layer;
-  const info = metricInfo(layer, s.metric);
+  const { layer, base, flag, info } = drawn(target);
   const total = state.catalog.layers[layer];
   const block = document.createElement("div");
   block.className = "legend-block";
   block.innerHTML = `<h3></h3><div class="sub"></div>`;
-  block.querySelector("h3").textContent = info.label;
-  block.querySelector(".sub").textContent = target === "buildings" ? "per building" : `per unit · ${total.label}`;
+  block.querySelector("h3").textContent = base.label;
+  block.querySelector(".sub").textContent = (target === "buildings" ? "per building" : `per unit · ${total.label}`)
+    + (flag ? ` · shaded by ${info.label[0].toLowerCase()}${info.label.slice(1)}` : "");
+  if (base.kind === "boolean" && base.gradient) block.append(viewControl(target));
   if (!s.stats) return block;
+  if (flag && s.flagStats) block.append(passFail(s.flagStats));
 
   if (info.kind === "boolean") {
     const cats = document.createElement("div");
@@ -454,7 +547,16 @@ function histogram(target, info) {
 async function showDetails(feature) {
   const layerId = feature.layer.id;
   const body = $("details-body");
-  if (layerId === "gp-trees") {
+  if (layerId === "gp-parks") {
+    const p = feature.properties;
+    state.selected = null;
+    const min = state.catalog.parks.min_area_ha;
+    body.innerHTML = `<h3></h3><div class="sub">park</div><table></table>`;
+    body.querySelector("h3").textContent = p.name || "Unnamed park";
+    const rows = [["Area", p.area_ha != null ? `${(+p.area_ha).toFixed(2)} ha` : "—"],
+      ["Counted for 300", p.used === true || p.used === "true" ? "yes" : `no (under ${min} ha)`]];
+    body.querySelector("table").innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("");
+  } else if (layerId === "gp-trees") {
     const p = feature.properties;
     state.selected = null;
     body.innerHTML = `<h3>Tree</h3><div class="sub">from the tree layer</div><table></table>`;
@@ -470,10 +572,12 @@ async function showDetails(feature) {
     const metrics = state.catalog.layers[layer].metrics;
     const current = isBuilding ? state.buildings.metric : state.units.metric;
     const metricNames = new Set(metrics.map(m => m.name));
-    const codes = Object.keys(data).filter(k => k !== "id" && !metricNames.has(k) && data[k] !== null);
+    const label = k => (state.catalog.layers[k] ? state.catalog.layers[k].label : k);
+    // unit codes, shown with their level label and name (columns.geo_level_labels / geo_level_names)
+    const codes = Object.keys(data).filter(k => k !== "id" && k !== "name" && !k.startsWith("name:") && !metricNames.has(k) && data[k] !== null);
     body.innerHTML = "<h3></h3><div class='sub'></div><table></table>";
-    body.querySelector("h3").textContent = isBuilding ? `Building ${id}` : `${state.catalog.layers[layer].label} ${id}`;
-    body.querySelector(".sub").textContent = codes.map(k => `${k} ${data[k]}`).join(" · ") || (isBuilding ? "building" : "unit");
+    body.querySelector("h3").textContent = isBuilding ? `Building ${id}` : `${label(layer)} ${data.name || id}`;
+    body.querySelector(".sub").textContent = codes.map(k => `${label(k)} ${data["name:" + k] ?? data[k]}`).join(" · ") || (isBuilding ? "building" : "unit");
     const table = body.querySelector("table");
     for (const m of metrics) {
       const tr = document.createElement("tr");
@@ -558,6 +662,33 @@ function buildControls() {
   if (state.units.layer) fillMetricSelect(usel, state.units.layer, state.units.metric);
   usel.onchange = () => { setMetric("units", usel.value); saveView(); };
 
+  // boundary outlines, any number of unit layers at once
+  const ol = $("outlines");
+  for (const k of unitLayerNames()) {
+    const row = document.createElement("label");
+    row.className = "row";
+    row.innerHTML = `<input type="checkbox"${state.outlines.has(k) ? " checked" : ""}> <span></span>`;
+    row.querySelector("span").textContent = c.layers[k].label;
+    row.querySelector("input").onchange = e => {
+      e.target.checked ? state.outlines.add(k) : state.outlines.delete(k);
+      applyStyle();
+      saveView();
+    };
+    ol.append(row);
+  }
+  if (!unitLayerNames().length) $("outlines-controls").hidden = true;
+
+  // parks
+  const pbox = $("show-parks");
+  if (!c.parks) {
+    pbox.disabled = true;
+    $("parks-row").classList.add("disabled");
+    $("parks-note").textContent = "not available";
+  } else {
+    $("parks-note").textContent = `· ${c.parks.used.toLocaleString()} used`;
+    pbox.onchange = e => { state.parks.visible = e.target.checked; refreshLayer("parks"); renderLegend(); saveView(); };
+  }
+
   // trees
   const tbox = $("show-trees");
   if (!c.trees) {
@@ -587,6 +718,9 @@ function saveView() {
       unitStyle: state.units.style,
       units: state.units.visible,
       trees: state.trees.visible,
+      parks: state.parks.visible,
+      outlines: [...state.outlines],
+      view: state.buildings.view,
     }));
   } catch (_) { /* storage unavailable */ }
 }
@@ -609,8 +743,12 @@ async function main() {
 
   const has = (layer, m) => layer && catalog.layers[layer] && catalog.layers[layer].metrics.some(x => x.name === m);
   const saved = loadView() || {};
-  const unitLayers = Object.keys(catalog.layers).filter(k => k !== "buildings");
+  const unitLayers = unitLayerNames();
   state.basemap = BASEMAPS[saved.basemap] ? saved.basemap : "paper";
+  state.buildings.view = saved.view === "flag" ? "flag" : "gradient";
+  state.parks.visible = !!saved.parks && !!catalog.parks;
+  state.outlines = new Set((saved.outlines || []).filter(k => unitLayers.includes(k)));
+  $("show-parks").checked = state.parks.visible;
   state.buildings.metric = has("buildings", saved.buildingMetric) ? saved.buildingMetric : defaultMetric("buildings");
   state.units.layer = unitLayers.includes(saved.unitLayer) ? saved.unitLayer : unitLayers[unitLayers.length - 1] || null;
   state.units.metric = has(state.units.layer, saved.unitMetric) ? saved.unitMetric : state.units.layer ? defaultMetric(state.units.layer) : null;
@@ -622,10 +760,12 @@ async function main() {
   for (const o of $("unit-style").querySelectorAll("button")) o.classList.toggle("on", o.dataset.value === state.units.style);
   $("unit-metric").hidden = state.units.style !== "fill";
 
-  const statsFor = (layer, m) => (m ? getJSON(`/api/stats/${encodeURIComponent(layer)}/${encodeURIComponent(m)}`) : null);
-  [state.buildings.stats, state.units.stats] = await Promise.all([
-    statsFor("buildings", state.buildings.metric),
-    state.units.layer ? statsFor(state.units.layer, state.units.metric) : null,
+  const b = drawn("buildings"), u = drawn("units");
+  if (b.flag) state.buildings.mode = "rule";
+  [state.buildings.stats, state.buildings.flagStats, state.units.stats] = await Promise.all([
+    b.info ? statsFor("buildings", b.info.name) : null,
+    b.flag ? statsFor("buildings", b.flag.name) : null,
+    u.info ? statsFor(state.units.layer, u.info.name) : null,
   ]);
 
   map = new maplibregl.Map({
@@ -647,14 +787,14 @@ async function main() {
 
   map.on("zoomend", renderLegend);
   map.on("click", ev => {
-    const order = ["gp-trees", "gp-buildings", "gp-units-fill"];
+    const order = ["gp-trees", "gp-buildings", "gp-parks", "gp-units-fill"];
     const layers = order.filter(id => map.getLayer(id) && map.getLayoutProperty(id, "visibility") !== "none");
     const hits = map.queryRenderedFeatures(ev.point, { layers });
     if (!hits.length) return hideDetails();
     hits.sort((a, b) => order.indexOf(a.layer.id) - order.indexOf(b.layer.id));
     showDetails(hits[0]);
   });
-  for (const id of ["gp-trees", "gp-buildings", "gp-units-fill"]) {
+  for (const id of ["gp-trees", "gp-buildings", "gp-parks", "gp-units-fill"]) {
     map.on("mouseenter", id, () => { map.getCanvas().style.cursor = "pointer"; });
     map.on("mouseleave", id, () => { map.getCanvas().style.cursor = ""; });
   }
