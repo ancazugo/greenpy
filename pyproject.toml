@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 keywords = ["urban-greening", "3-30-300", "apache-sedona", "gis", "geospatial"]
 dependencies = [
     "apache-sedona[kepler-map,pydeck-map]==1.9.0",
+    "duckdb>=1.3",
     "earthengine-api>=1.7.12",
     "eemont>=2025.7.1",
     "geopandas>=1.1.2",

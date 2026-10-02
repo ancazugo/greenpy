@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>greenpy map</title>
+<link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="map"></div>
+
+<section class="panel" id="masthead">
+  <h1><span class="wordmark">greenpy</span> <span id="area-name"></span></h1>
+  <p class="counts" id="counts"></p>
+  <label class="label" for="building-metric">Buildings coloured by</label>
+  <select id="building-metric"></select>
+</section>
+
+<section class="panel" id="layers">
+  <h2 class="label">Basemap</h2>
+  <div id="basemaps"></div>
+  <h2 class="label">Layers</h2>
+  <label class="row"><input type="checkbox" id="show-buildings" checked> Buildings</label>
+  <div id="units-controls">
+    <label class="row"><input type="checkbox" id="show-units"> Units</label>
+    <div class="indent">
+      <select id="unit-layer" aria-label="Unit level"></select>
+      <div class="seg" id="unit-style" role="group" aria-label="Unit style">
+        <button type="button" data-value="outline" class="on">Outline</button><button type="button" data-value="fill">Fill</button>
+      </div>
+      <select id="unit-metric" aria-label="Unit metric" hidden></select>
+    </div>
+  </div>
+  <label class="row" id="trees-row"><input type="checkbox" id="show-trees"> Trees <span class="muted" id="trees-note"></span></label>
+</section>
+
+<section class="panel" id="legend"></section>
+
+<section class="panel" id="details" hidden>
+  <button type="button" class="close" id="details-close" aria-label="Close">×</button>
+  <div id="details-body"></div>
+</section>
+
+<script src="/static/vendor/maplibre-gl.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

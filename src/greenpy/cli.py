@@ -235,6 +235,46 @@ def run(
     logger.info(f"{process} completed for {len(codes)} regions")
 
 
+@app.command()
+def viz(
+    config: Path = typer.Option(..., "--config", "-c", help="Path to study-area YAML config file"),
+    port: int = typer.Option(8765, "--port", help="Port to serve the map on"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Interface to bind (default: this machine only)"),
+    rebuild: bool = typer.Option(False, "--rebuild", is_flag=True, help="Rebuild the map store even if outputs are unchanged"),
+    no_browser: bool = typer.Option(False, "--no-browser", is_flag=True, help="Don't open a browser tab"),
+    no_trees: bool = typer.Option(False, "--no-trees", is_flag=True, help="Skip loading trees (faster first build)"),
+    log_level: str = typer.Option("INFO", "--log_level", help="Logging level"),
+):
+    """Open an interactive map of the results in <output.base_dir>.
+
+    Shows whatever has been computed so far — module CSVs are read directly, so
+    Merge is optional. The first start builds `database/viz.duckdb` (rebuilt
+    automatically when outputs change); over SSH, forward the port
+    (`ssh -L 8765:localhost:8765 host`) and open http://localhost:8765.
+    """
+    from .viz.catalog import build_catalog
+    from .viz.server import serve
+    from .viz.store import connect, ensure_store, read_meta
+    from .viz.tiles import TileStore
+
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    setup_logger(log_dir / "viz.log", log_level)
+    cfg = load_config(config)
+    try:
+        catalog = build_catalog(cfg)
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    path = ensure_store(catalog, rebuild=rebuild, include_trees=not no_trees)
+    con = connect(path, read_only=True)
+    try:
+        meta = read_meta(con)
+    finally:
+        con.close()
+    serve(TileStore(path, meta), host=host, port=port, open_browser=not no_browser)
+
+
 def main():
     app()
 

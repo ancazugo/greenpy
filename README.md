@@ -88,6 +88,8 @@ docker compose run --rm greenpy run -c /config/city.yaml -p T3 --buffer 100
 
 The core 3-30-300 pipeline (T3, T30, T300, Tree_count, Visibility, Merge) with local data needs no GEE.
 
+**Results map.** Publish the port and bind to all interfaces inside the container: `docker run --rm -p 8765:8765 ... greenpy viz -c /data/config.yaml --host 0.0.0.0 --no-browser`, then open http://localhost:8765.
+
 ## Input data
 
 All inputs are vector files readable by GeoPandas (GeoPackage, Shapefile, GeoJSON, (Geo)Parquet…):
@@ -140,6 +142,7 @@ greenpy run -c config.yaml -p Tree_count
 greenpy run -c config.yaml -p Visibility      # optional, needs building heights
 greenpy run -c config.yaml -p Spectral        # optional, needs GEE
 greenpy run -c config.yaml -p Merge
+greenpy viz -c config.yaml                    # interactive map, see "Visualising results"
 ```
 
 Useful options:
@@ -204,6 +207,24 @@ A criterion with missing input is left null and excluded from that percentage; t
 
 Each building belongs to exactly one census unit — the one containing its representative point — and is output only by that unit's run, including buildings that straddle unit boundaries. Buildings whose representative point lies outside every unit are skipped. T3's default `rdd` query path omits buildings with no tree in the buffer (the `sql` path reports them as 0); Merge fills them with 0. T300 keeps every building: with no reachable park within `osm.fetch_buffer` (default 2 km) its distances are null.
 
+## Visualising results
+
+`greenpy viz` opens an interactive map of whatever has been computed so far:
+
+```bash
+greenpy viz -c config.yaml            # opens http://localhost:8765
+```
+
+- **Buildings** are coloured by any per-building metric (T3 tree counts, park distances, T30_buildings canopy, visible trees and, after Merge, the `meets_*` rule flags). Choose quantile, equal-interval or **rule** classes; the last uses diverging colours centred on the 3-30-300 threshold (3 trees, 30 %, 300 m).
+- **Units** (every census level, plus any DGGS grid already built) can be drawn as outlines over the buildings or filled with a unit metric: Merge's table at its level, T30/Tree_count/Spectral at the sub-geo level, and averages of the building metrics at every level.
+- **Trees** from `data.trees_dir` are drawn to scale (crown radius from the area column or polygon area) or as dots when only points are available.
+- Drag across the legend histogram to show only a value range; click a feature for all of its values.
+- Basemaps: none, OpenFreeMap, CARTO, OpenStreetMap, or Sentinel-2 imagery (EOX, non-commercial).
+
+Merge is optional: module CSVs are read directly when its parquets are missing. The first start builds `database/viz.duckdb` (geometry reprojected and indexed, statistics precomputed), and later starts reuse it until an output changes; `--rebuild` forces a rebuild and `--no-trees` skips the tree layer. Buildings and trees appear from zoom 14 (a view about 3.5 km across), which keeps whole-city datasets responsive; zoomed further out, show units instead.
+
+The server listens on `127.0.0.1` only. On a remote machine, forward the port (`ssh -L 8765:localhost:8765 host`) and pass `--no-browser`. DuckDB downloads its spatial extension on first use; set `GREENPY_DUCKDB_EXTENSIONS=/some/dir` if your home directory is full or read-only.
+
 ## Output layout
 
 ```
@@ -217,5 +238,6 @@ Each building belongs to exactly one census unit — the one containing its repr
 ├── Spectral/      Spectral_<code>.csv
 └── database/      parquet cache + consolidated outputs
     ├── T3_30_300_buildings.parquet  ← per-building 3-30-300 evaluation
-    └── T3_30_300_spectral.parquet   ← final merged table
+    ├── T3_30_300_spectral.parquet   ← final merged table
+    └── viz.duckdb                   ← map store built by `greenpy viz`
 ```
