@@ -14,7 +14,9 @@ from ..dggs import SYSTEM_NAMES
 from ..merge import RULE_MAX_DISTANCE, RULE_MIN_CANOPY, RULE_MIN_TREES, _buffers_in
 
 BUILDING_KEY = "building_id"
-RULE_FLAGS = ("meets_3", "meets_30", "meets_300", "meets_3_30_300")
+# the three criteria first (store relies on RULE_FLAGS[:3]), then the combined rule and the
+# per-metric "3" flags Merge keeps beside meets_3
+RULE_FLAGS = ("meets_3", "meets_30", "meets_300", "meets_3_30_300", "meets_3_proximity", "meets_3_visibility")
 # per-building number of rule criteria met (0-3), derived in the store from the flags
 CRITERIA_MET = "criteria_met"
 # columns that are bookkeeping, not metrics
@@ -134,7 +136,12 @@ def describe(name: str, module: str = "") -> Metric:
     if m := re.fullmatch(r"building_canopy_cover_(\d+)m", base):
         return Metric(name, f"Canopy cover within {m.group(1)} m (%)", module or "T30_buildings", "percent", RULE_MIN_CANOPY, "high")
     if m := re.fullmatch(r"visible_trees_(\d+)m", base):
-        return Metric(name, f"Visible trees within {m.group(1)} m", module or "Visibility", "count", better="high")
+        return Metric(name, f"Trees visible within {m.group(1)} m", module or "Visibility", "count", RULE_MIN_TREES, "high")
+    if m := re.fullmatch(r"visible_trees_ground_(\d+)m", base):
+        return Metric(name, f"Trees visible from the ground floor within {m.group(1)} m", module or "Visibility",
+                      "count", RULE_MIN_TREES, "high")
+    if base == "building_height":
+        return Metric(name, "Building height (m)", module or "Heights", "value")
     if base == "n_buildings":
         return Metric(name, "Buildings in unit", module or "Other", "count")
     if base in ("total_trees", "tree_count"):
@@ -148,6 +155,8 @@ def _rule_label(flag: str) -> str:
         "meets_30": "Meets 30 (canopy)",
         "meets_300": "Meets 300 (park)",
         "meets_3_30_300": "Meets 3-30-300",
+        "meets_3_proximity": "Meets 3 (trees nearby)",
+        "meets_3_visibility": "Meets 3 (trees in view)",
     }[flag]
 
 
@@ -186,7 +195,7 @@ def _columns(src_path: str, fmt: str) -> list[str]:
     return _parquet_columns(Path(src_path)) if fmt == "parquet" else _csv_header(src_path)
 
 
-def _building_sources(base: Path, db: Path) -> list[Source]:
+def _building_sources(cfg: GreenPyConfig, base: Path, db: Path) -> list[Source]:
     sources: list[Source | None] = []
 
     buffers = sorted(set(_buffers_in(db, "T3", "parquet")) | set(_buffers_in(base / "T3", "T3", "csv")))
@@ -214,8 +223,13 @@ def _building_sources(base: Path, db: Path) -> list[Source]:
     for b in buffers:
         sources.append(_source(
             db, base / "Visibility", f"Visibility_{b}m.parquet", f"*_{b}m.csv",
-            BUILDING_KEY, {"visible_trees": f"visible_trees_{b}m"}, "Visibility",
+            BUILDING_KEY, {"visible_trees": f"visible_trees_{b}m", "visible_trees_ground": f"visible_trees_ground_{b}m"},
+            "Visibility",
         ))
+
+    heights = _heights_parquet(cfg, db)
+    if heights is not None:
+        sources.append(Source(str(heights), "parquet", BUILDING_KEY, {"building_height": "building_height"}, "Heights"))
 
     rule = db / "T3_30_300_buildings.parquet"
     if rule.exists():
@@ -303,15 +317,32 @@ def _unit_layers(cfg: GreenPyConfig, db: Path, unit_sources: list[Source]) -> li
     return layers
 
 
+def _heights_parquet(cfg: GreenPyConfig, db: Path) -> Path | None:
+    """The building heights table of the configured heights chain, if built (`-p Heights` / Visibility)."""
+    from ..heights.enrich import heights_cache_path
+
+    if not (db / "buildings.parquet").exists():
+        return None
+    path = heights_cache_path(cfg)
+    return path if path.exists() else None
+
+
 def _rule_gradients(db: Path) -> dict[str, str]:
-    """Which metric each rule flag tests, read from the columns Merge wrote beside the flags."""
+    """Which metric each rule flag tests: Merge's greenpy_rule metadata, else the columns beside the flags."""
+    from ..merge import read_rule_metadata
+
     rule = db / "T3_30_300_buildings.parquet"
     if not rule.exists():
         return {}
     cols = _parquet_columns(rule)
     out = {}
     if t := next((c for c in cols if re.fullmatch(r"tree_count_\d+m", c)), None):
-        out["meets_3"] = t
+        out["meets_3"] = out["meets_3_proximity"] = t
+    if v := next((c for c in cols if re.fullmatch(r"visible_trees_\d+m", c)), None):
+        out["meets_3_visibility"] = v
+    meta = read_rule_metadata(rule)
+    if meta and meta.get("t3_col") in cols:
+        out["meets_3"] = meta["t3_col"]
     if c := next((c for c in cols if re.fullmatch(r"building_canopy_cover_\d+m", c)), None):
         out["meets_30"] = c
     elif "canopy_cover" in cols:
@@ -354,7 +385,7 @@ def build_catalog(cfg: GreenPyConfig) -> Catalog:
         crs=cfg.crs,
         base_dir=base,
         buildings=buildings,
-        building_sources=_building_sources(base, db),
+        building_sources=_building_sources(cfg, base, db),
         unit_layers=_unit_layers(cfg, db, unit_sources),
         trees=_tree_source(cfg),
         census_levels=list(cfg.columns.geo_levels),

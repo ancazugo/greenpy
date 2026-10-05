@@ -62,7 +62,7 @@ def test_dggs_layer_discovered(tmp_path):
     ("building_canopy_cover_25m", "percent", 30, "high"),
     ("meets_3_30_300", "boolean", None, "high"),
     ("pct_meets_300", "percent", None, "high"),
-    ("visible_trees_50m", "count", None, "high"),
+    ("visible_trees_50m", "count", 3, "high"),
     ("NDVI", "value", None, None),
 ])
 def test_describe(name, kind, threshold, better):
@@ -117,3 +117,31 @@ def test_grid_runs_sit_beside_census_runs(tmp_path):
     assert {s.path for s in layers["TRACT"].sources} == {str(tmp_path / "T30" / "*.csv"), str(tmp_path / "Tree_count" / "*.csv")}
     rule = next(s for s in cat.building_sources if s.module == "Rule")
     assert rule.path.endswith("T3_30_300_buildings.parquet")
+
+
+def test_visibility_and_height_metrics():
+    from greenpy.viz.catalog import describe
+
+    m = describe("visible_trees_ground_50m")
+    assert m.kind == "count" and m.threshold == 3 and m.module == "Visibility"
+    assert describe("visible_trees_50m").threshold == 3
+    assert describe("building_height").module == "Heights"
+    assert describe("meets_3_visibility").kind == "boolean"
+    assert describe("pct_meets_3_visibility").label == "% of buildings meeting 3 (trees in view)"
+
+
+def test_rule_gradients_follow_merge_metadata(tmp_path):
+    import pandas as pd
+
+    from greenpy.merge import write_rule_parquet
+    from greenpy.viz.catalog import _rule_gradients
+
+    df = pd.DataFrame({"building_id": [1], "tree_count_50m": [4], "visible_trees_50m": [1],
+                       "distance_euclidean": [10.0], "meets_3": [False], "meets_3_30_300": [False]})
+    write_rule_parquet(df, tmp_path / "T3_30_300_buildings.parquet", {"t3_metric": "visibility", "t3_col": "visible_trees_50m"})
+    g = _rule_gradients(tmp_path)
+    assert g["meets_3"] == "visible_trees_50m"
+    assert g["meets_3_proximity"] == "tree_count_50m" and g["meets_3_visibility"] == "visible_trees_50m"
+    # tables written before the metadata existed fall back to the T3 column
+    df.to_parquet(tmp_path / "T3_30_300_buildings.parquet")
+    assert _rule_gradients(tmp_path)["meets_3"] == "tree_count_50m"
