@@ -19,7 +19,7 @@ from loguru import logger
 
 from .catalog import BUILDING_KEY, CRITERIA_MET, RULE_FLAGS, Catalog, Source, UnitLayer, describe
 
-STORE_VERSION = 5
+STORE_VERSION = 6
 # building columns holding a census unit's name, e.g. "name:ADM3_code"
 NAME_PREFIX = "name:"
 N_CLASSES = 7
@@ -340,13 +340,14 @@ def metric_stats(con: duckdb.DuckDBPyConnection, table: str, metric: str) -> dic
     if sum(q > vmin for q in quantiles) < 3:
         # one value (typically 0) is so common that the quantile breaks collapse onto
         # it: it keeps its own class and the remaining classes split the values above
-        # it, starting at the smallest of them so they never share the tied value's colour
+        # it, starting at the smallest of them so they never share the tied value's colour;
+        # the collapsed breaks are dropped so the classes still fit the N_CLASSES ramp
         rest_min, rest_qs = con.execute(f"""
             SELECT min({col}), quantile_cont({col}, {[i / (N_CLASSES - 2) for i in range(1, N_CLASSES - 2)]})
             FROM {table} WHERE {finite} AND {col} > {vmin}
         """).fetchone()
         if rest_min is not None:
-            quantiles = sorted(set(quantiles) | {round(q, 4) for q in [rest_min, *rest_qs]})
+            quantiles = sorted({round(q, 4) for q in [rest_min, *rest_qs]})
     stats |= {
         "integer": integer,
         "domain": [lo, hi],

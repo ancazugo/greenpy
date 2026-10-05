@@ -133,8 +133,16 @@ def test_quantiles_survive_a_dominant_value():
     con = duckdb.connect()
     con.execute("CREATE TABLE units AS SELECT 0.0 AS pct_meets_3 FROM range(83) UNION ALL SELECT 7.0 UNION ALL SELECT 22.6")
     q = metric_stats(con, "units", "pct_meets_3")["quantile"]
-    assert q[0] <= 0 < 7.0 == min(b for b in q if b > 0)  # 0 keeps a class; 7 starts the next one
+    assert min(q) == 7.0  # 0 sits below the first break, in a class of its own; 7 starts the next one
     assert sum(b > 0 for b in q) >= 3
+    assert len(q) < N_CLASSES  # the client draws len(q) + 1 classes from an N_CLASSES ramp
+
+    # dominant but not overwhelming (~80 % zeros): two quantiles already sit above 0, and the
+    # fallback must replace them rather than add to them
+    con.execute("CREATE TABLE mostly AS SELECT 0.0 AS pct_meets_3 FROM range(800) "
+                "UNION ALL SELECT CAST(range AS DOUBLE) + 1 FROM range(200)")
+    q = metric_stats(con, "mostly", "pct_meets_3")["quantile"]
+    assert len(q) < N_CLASSES and min(q) == 1.0
 
     # an ordinary spread keeps plain quantiles
     con.execute("CREATE TABLE spread AS SELECT CAST(range AS DOUBLE) AS pct_meets_3 FROM range(100)")

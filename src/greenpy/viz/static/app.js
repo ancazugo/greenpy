@@ -112,8 +112,10 @@ function classify(info, stats, mode) {
     else colors = [...fail.slice(3 - nBelow), ...pass.slice(0, breaks.length + 1 - nBelow)];
     return { breaks, colors, threshold: t };
   }
-  const breaks = clean(mode === "equal" ? stats.equal : stats.quantile);
   const base = info.better === "high" ? RAMPS.high : info.better === "low" ? RAMPS.high.slice().reverse() : RAMPS.neutral;
+  let breaks = clean(mode === "equal" ? stats.equal : stats.quantile);
+  // never more classes than the ramp has colours
+  if (breaks.length >= base.length) breaks = sample(breaks, base.length - 1);
   return { breaks, colors: sample(base, breaks.length + 1) };
 }
 
