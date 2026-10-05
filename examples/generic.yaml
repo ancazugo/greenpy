@@ -230,6 +230,19 @@ visibility:
   # Metres ignored at both ends of each sightline (null = resolution)
   end_skip: null
 
+# Ground under buildings and trees for Visibility (raster engine): fabdem
+# (bare earth, CC BY-NC-SA 4.0 — the default), copernicus or nasadem (surface
+# models: they include rooftops and canopy, so heights get counted twice in
+# cities), a local DTM raster file/directory, or null for flat ground.
+terrain:
+  source: fabdem
+  resolution: 30  # GEE download resolution (m)
+
+# Metres around the study area gathered as context: remote-source buildings
+# in this ring block views (never observers), and `-p Trees` segments the
+# ring's trees so they count for edge buildings in T3 and Visibility. 0 = off.
+context_buffer: 100
+
 # Tile system — legacy key kept for older configs; tree and CHM tile
 # directories are always searched by file extent, whatever this is set to
 tile_system:

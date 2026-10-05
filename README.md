@@ -35,7 +35,7 @@ greenpy computes each metric per building and per census unit from standard geos
 
 ```bash
 uv sync
-source /maps/acz25/envs/greenpy-env/bin/activate   # project environment
+source /maps/acz25/envs/greenpy/bin/activate   # project environment
 ```
 
 > The environment lives outside the repo, so installing new dependencies needs the `--active` flag: `uv add --active <package>`.
@@ -259,7 +259,29 @@ Two engines share these definitions:
 - **`raster`** (default) — casts the sightlines over a surface model on a `visibility.resolution` grid (1 m): buildings burned at their heights plus the vegetation, which is the canopy height model when one is configured (`data.chm_tiles_dir` or `tree_segmentation.source`; Meta's CHM is cleared on roofs, `mask_chm_buildings`) and the tree crowns at their heights otherwise (`vegetation: auto|chm|crowns`). A numba kernel visits every pixel each sightline crosses, in parallel (`--parallel --n_workers N` sets the threads, default 16); buildings are processed in `tile_size` tiles (2 km). It needs no Spark. Edges are only as sharp as the grid: a sightline that clips a building corner by less than a pixel may be judged differently from exact geometry (set `resolution: 0.5` to tighten).
 - **`vector`** (`--vis_engine vector`) — the exact computation in Sedona SQL, intersecting every sightline with every footprint and crown polygon; a reference for small areas, writing `Visibility_vector/` so Merge never mixes engines. On the synthetic city both engines agree on 47 of 48 buildings (the other differs by one ground-floor tree, a sightline grazing a building corner); on three Cambridge output areas (312 buildings) they agree on `meets_3` for 99.7 % of buildings, with the raster engine seeing 2.5 % fewer trees on average, at ~1 s per area against ~50 s.
 
-Building heights come from the `Heights` chain (built on the first Visibility run when missing) and tree heights from `tree_height_col`. Terrain is flat, so hills (e.g. eastern Bogotá) are not modelled, and units at the edge of the study area see no obstacles beyond it.
+Building heights come from the `Heights` chain (built on the first Visibility run when missing) and tree heights from `tree_height_col`.
+
+**Terrain.** The raster engine stands everything on the ground: buildings sit flat at the ground under their representative point plus their height, vegetation on the ground, windows and targets on the ground under them (floors stay relative to it), and the bare ground itself — a hill, a ridge — blocks sightlines. The ground comes from `terrain.source`:
+
+```yaml
+terrain:
+  source: fabdem      # fabdem (default) | copernicus | nasadem | /path/to/dtm.tif or directory | null (flat)
+  resolution: 30      # GEE download resolution (m), resampled bilinearly onto the visibility grid
+```
+
+| Source | Dataset | Surface | Licence |
+|---|---|---|---|
+| `fabdem` (default) | [FABDEM](https://gee-community-catalog.org/projects/fabdem/), Copernicus GLO-30 with buildings and forests removed | bare earth | **CC BY-NC-SA 4.0 — non-commercial** |
+| `copernicus` | Copernicus GLO-30 | surface model | Copernicus DEM licence |
+| `nasadem` | NASADEM (SRTM) | surface model | public domain |
+
+Use a bare-earth model: surface models already contain rooftops and canopy in cities, so building and tree heights would be counted twice (in central Bogotá Copernicus reads 8 m above FABDEM). DEM tiles are cached under the CHM cache directory. The vector engine always assumes flat ground. In Cambridge (flat) terrain changed the visible-tree count of 1.2 % of buildings and `meets_3` for 12 of 45,682.
+
+**Study-area edges.** `context_buffer` (default 100 m, a top-level key; 0 disables) gathers context in a ring around the study area, so edge buildings are judged like any other:
+
+- *Buildings* — with a remote building source (`osm`, `overture`, `open_buildings`) the ring's footprints are fetched once into `database/context_buildings.parquet`. They get heights from the Heights chain and block views, but belong to no unit, so they are never observers and appear in no output. A building file is used whole, so extend it past the study area to cover the ring.
+- *Trees* — a full `-p Trees` run also segments the ring into `trees_context.parquet` (`--geo_code context` does only the ring, e.g. for an existing run), so trees just across the boundary count for edge buildings in T3 and Visibility; Tree_count and T30 still count only trees inside each unit. A tree file is used whole.
+- The canopy height model and the DEM are read past the boundary anyway.
 
 First results (raster engine, 16 threads):
 
@@ -326,6 +348,7 @@ The server listens on `127.0.0.1` only. On a remote machine, forward the port (`
 ├── T30_h3_9/, Tree_count_h3_9/   same, per grid cell (runs with --dggs h3 --dggs_resolution 9)
 └── database/      parquet cache + consolidated outputs
     ├── building_heights_<key>.parquet ← one height per building (Heights; per-source caches in heights/)
+    ├── context_buildings.parquet    ← footprints in the context_buffer ring (remote building sources)
     ├── T3_30_300_buildings.parquet  ← per-building 3-30-300 evaluation
     ├── T3_30_300_spectral.parquet   ← final merged table
     ├── h3_boundaries_res9.parquet   ← grid cells (+ T3_30_300_*_h3_9.parquet from a grid Merge)
