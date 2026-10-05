@@ -5,26 +5,17 @@ Queries the polygons FeatureCollection through Google Earth Engine, so it needs
 `gee_project` (or the GEE_PROJECT_NAME env var) and a prior `earthengine
 authenticate`. The dataset covers Africa, South and Southeast Asia, and Latin
 America & the Caribbean only — NOT Europe or North America — and ships no
-building heights, so the Visibility module cannot be used with this source.
+building heights: Visibility needs heights.sources beyond `native` (e.g.
+open_buildings_temporal, gba, ghs_built_h).
 """
 
 import geopandas as gpd
 from loguru import logger
 from shapely.geometry import Polygon, MultiPolygon, mapping
 
+from .utils.gee import ensure_gee
+
 OPEN_BUILDINGS_ASSET = "GOOGLE/Research/open-buildings/v3/polygons"
-
-_GEE_READY = False
-
-
-def _ensure_gee(project: str | None) -> None:
-    """Initialise GEE once per process (avoids re-authenticating per geo code)."""
-    global _GEE_READY
-    if not _GEE_READY:
-        from .optional.spectral import setup_gee
-
-        setup_gee(project)
-        _GEE_READY = True
 
 
 def fetch_open_buildings(
@@ -37,15 +28,15 @@ def fetch_open_buildings(
     import ee
 
     logger.warning(
-        "Google Open Buildings provides no building heights — the optional Visibility module "
-        "cannot be used with buildings: open_buildings"
+        "Google Open Buildings provides no building heights — add height sources to heights.sources "
+        "(e.g. open_buildings_temporal, gba) before running Visibility"
     )
     logger.warning(
         "Google Open Buildings v3 covers Africa, South and Southeast Asia, and Latin America & "
         "the Caribbean only — Europe and North America are NOT covered"
     )
 
-    _ensure_gee(gee_project)
+    ensure_gee(gee_project)
     region = ee.Geometry(mapping(polygon_4326))
     fc = (
         ee.FeatureCollection(OPEN_BUILDINGS_ASSET)

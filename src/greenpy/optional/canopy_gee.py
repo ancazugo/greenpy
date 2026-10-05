@@ -24,17 +24,7 @@ import geopandas as gpd
 from loguru import logger
 
 from ..config.schema import GreenPyConfig
-from .spectral import setup_gee
-
-_GEE_READY = False
-
-
-def _ensure_gee(project: str | None) -> None:
-    """Initialise GEE once per process (avoids re-authenticating per geo code)."""
-    global _GEE_READY
-    if not _GEE_READY:
-        setup_gee(project)
-        _GEE_READY = True
+from ..utils.gee import ensure_gee, write_raster
 
 
 def gee_cache_path(cfg: GreenPyConfig, name: str, low_threshold: float, high_threshold: float, scale: float) -> Path:
@@ -66,7 +56,7 @@ def download_binary_canopy(
         logger.debug(f"Using cached GEE canopy raster {cache_path}")
         return rxr.open_rasterio(cache_path, masked=True)
 
-    _ensure_gee(cfg.gee_project)
+    ensure_gee(cfg.gee_project)
     logger.info(f"Downloading GEE canopy mask from {cfg.data.canopy_height_ee_path} at {scale} m")
 
     # Build the output pixel grid directly in the projected CRS (metres), so GEE
@@ -116,6 +106,6 @@ def download_binary_canopy(
         # tag NaN as nodata so raster readers (rioxarray masked=True, Sedona
         # RS_ZonalStats) can exclude unmapped pixels from pixel counts
         da = da.rio.write_nodata(float("nan"))
-        da.rio.to_raster(cache_path)
+        write_raster(da, cache_path)
 
     return da
