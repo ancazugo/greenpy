@@ -53,3 +53,14 @@ def test_summarise_rule_percentages_over_known_buildings():
     # L2: canopy known only for d (31 %) -> 100 %; combined known only for d (fails) -> 0 %
     assert summary.loc["L2", "pct_meets_30"] == 100.0
     assert summary.loc["L2", "pct_meets_3_30_300"] == 0.0
+
+
+def test_evaluate_rule_keeps_both_tree_metrics():
+    df = _buildings().assign(visible_trees_50m=[1, 2, 5, 0, 3])
+    out = evaluate_rule(df, "visible_trees_50m", "canopy_cover", "distance_euclidean",
+                        {"proximity": "tree_count_50m", "visibility": "visible_trees_50m"})
+    assert out["meets_3"].tolist() == [False, False, True, False, True]  # visibility drives the rule
+    assert out["meets_3_proximity"].tolist() == [True, False, True, False, True]
+    assert out["meets_3_visibility"].tolist() == out["meets_3"].tolist()
+    summary = summarise_rule(out, "LAD").set_index("LAD")
+    assert summary.loc["L1", "pct_meets_3_proximity"] == 66.67 and summary.loc["L1", "pct_meets_3_visibility"] == 33.33

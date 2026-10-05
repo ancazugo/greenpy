@@ -79,6 +79,7 @@ def run(
     rule_t3_buffer: int = typer.Option(50, "--rule_t3_buffer", help="Merge: T3 buffer (m) whose count must be >= 3 for the rule's '3'"),
     rule_t30_buffer: Optional[int] = typer.Option(None, "--rule_t30_buffer", help="Merge: use T30_buildings canopy within this buffer (m) for the rule's '30' instead of the building's sub-geo unit canopy"),
     rule_distance: str = typer.Option("euclidean", "--rule_distance", help="Merge: park distance for the rule's '300': euclidean (straight line, WHO) or network"),
+    rule_t3_metric: str = typer.Option("proximity", "--rule_t3_metric", help="Merge: the rule's '3' counts T3 trees within --rule_t3_buffer (proximity) or trees visible from some floor (visibility, needs Visibility at that buffer); both flags are reported"),
     parallel: bool = typer.Option(False, "--parallel", is_flag=True, help="Run geo codes in parallel"),
     n_workers: int = typer.Option(2, "--n_workers", help="Number of parallel workers"),
     log_level: str = typer.Option("INFO", "--log_level", help="Logging level"),
@@ -106,6 +107,10 @@ def run(
 
     if rule_distance not in ("euclidean", "network"):
         typer.echo(f"Error: --rule_distance must be 'euclidean' or 'network', got '{rule_distance}'", err=True)
+        raise typer.Exit(1)
+
+    if rule_t3_metric not in ("proximity", "visibility"):
+        typer.echo(f"Error: --rule_t3_metric must be 'proximity' or 'visibility', got '{rule_t3_metric}'", err=True)
         raise typer.Exit(1)
 
     if composite not in ("max", "median"):
@@ -175,6 +180,7 @@ def run(
             sedona, cfg, merge_geo_level, sub_geo_level or geo_levels[-1], t3_buffers,
             dggs=dggs, dggs_resolution=dggs_resolution,
             rule_t3_buffer=rule_t3_buffer, rule_t30_buffer=rule_t30_buffer, rule_distance=rule_distance,
+            rule_t3_metric=rule_t3_metric,
         )
         return
 

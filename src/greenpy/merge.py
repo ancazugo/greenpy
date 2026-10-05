@@ -195,19 +195,27 @@ def aggregate_tree_count(sedona: SparkSession, geo_level: str, sub_geo_level: st
 
 def _aggregate_building_buffers(
     sedona: SparkSession, geo_level: str, buffers: list[int], view_prefix: str,
-    value_col: str, out_prefix: str, agg_view: str,
+    columns: list[tuple[str, str]], agg_view: str,
 ) -> DataFrame | None:
-    """Average a per-building metric up to geo_level via the buildings overlay, one column per buffer.
+    """Average per-building metrics up to geo_level via the buildings overlay, one column per metric and buffer.
 
-    Output columns are `<out_prefix>_<buffer>m`. Returns None when no buffer exists.
+    columns holds (value_col, out_prefix) pairs; value columns missing from a
+    buffer's table are skipped. Output columns are `<out_prefix>_<buffer>m`.
+    Returns None when no buffer exists.
     """
     if not buffers:
         return None
 
+    def select(buffer: int) -> str:
+        present = set(sedona.table(f"{view_prefix}_{buffer}m").columns)
+        return ", ".join(
+            f"ROUND(AVG(t.{value_col}), 2) AS {out_prefix}_{buffer}m"
+            for value_col, out_prefix in columns if value_col in present
+        )
+
     per_buffer = [
         sedona.sql(f"""
-        SELECT bbo.{geo_level},
-        ROUND(AVG(t.{value_col}), 2) AS {out_prefix}_{buffer}m
+        SELECT bbo.{geo_level}, {select(buffer)}
         FROM {view_prefix}_{buffer}m t
         LEFT JOIN boundaries_buildings_overlay bbo ON t.building_id = bbo.building_id
         GROUP BY bbo.{geo_level}
@@ -230,14 +238,16 @@ def aggregate_t30_buildings(sedona: SparkSession, geo_level: str, buffers: list[
     T30_buildings output exists.
     """
     return _aggregate_building_buffers(
-        sedona, geo_level, buffers, "t30_buildings", "canopy_cover", "building_canopy_cover", "t30_buildings_agg"
+        sedona, geo_level, buffers, "t30_buildings", [("canopy_cover", "building_canopy_cover")], "t30_buildings_agg"
     )
 
 
 def aggregate_visibility(sedona: SparkSession, geo_level: str, buffers: list[int]) -> DataFrame | None:
-    """Average per-building visible tree counts up to geo_level (`visible_trees_<buffer>m`)."""
+    """Average per-building visible tree counts up to geo_level (`visible_trees_<buffer>m`, from any
+    floor, and `visible_trees_ground_<buffer>m`, from the ground floor)."""
     return _aggregate_building_buffers(
-        sedona, geo_level, buffers, "visibility", "visible_trees", "visible_trees", "visibility_agg"
+        sedona, geo_level, buffers, "visibility",
+        [("visible_trees", "visible_trees"), ("visible_trees_ground", "visible_trees_ground")], "visibility_agg",
     )
 
 
@@ -247,12 +257,18 @@ RULE_MIN_CANOPY = 30.0
 RULE_MAX_DISTANCE = 300.0
 
 
-def evaluate_rule(buildings_df: pd.DataFrame, tree_col: str | None, canopy_col: str | None, distance_col: str) -> pd.DataFrame:
+def evaluate_rule(
+    buildings_df: pd.DataFrame, tree_col: str | None, canopy_col: str | None, distance_col: str,
+    tree_cols_by_metric: dict[str, str | None] | None = None,
+) -> pd.DataFrame:
     """Add per-building 3-30-300 pass/fail columns (nullable booleans).
 
     meets_3: tree count >= 3; meets_30: canopy cover >= 30 %; meets_300:
     park distance <= 300 m. A missing input (or tree_col/canopy_col None)
     leaves that criterion null; meets_3_30_300 is null unless all three are known.
+    tree_cols_by_metric (e.g. {"proximity": "tree_count_50m", "visibility":
+    "visible_trees_50m"}) adds a meets_3_<metric> flag per tree count, so the
+    metrics not chosen for meets_3 stay comparable.
     """
     df = buildings_df.copy()
 
@@ -263,6 +279,8 @@ def evaluate_rule(buildings_df: pd.DataFrame, tree_col: str | None, canopy_col: 
         return ok(values).astype("boolean").mask(values.isna())
 
     df["meets_3"] = _flag(tree_col, lambda v: v >= RULE_MIN_TREES)
+    for metric, col in (tree_cols_by_metric or {}).items():
+        df[f"meets_3_{metric}"] = _flag(col, lambda v: v >= RULE_MIN_TREES)
     df["meets_30"] = _flag(canopy_col, lambda v: v >= RULE_MIN_CANOPY)
     df["meets_300"] = _flag(distance_col, lambda v: v <= RULE_MAX_DISTANCE)
     # Kleene AND would make "False & NA" False; the combined rule needs all three known
@@ -274,6 +292,7 @@ def evaluate_rule(buildings_df: pd.DataFrame, tree_col: str | None, canopy_col: 
 def summarise_rule(evaluated_df: pd.DataFrame, geo_level: str) -> pd.DataFrame:
     """Per geo_level unit, % of buildings meeting each criterion (over buildings where it is known)."""
     flags = ["meets_3", "meets_30", "meets_300", "meets_3_30_300"]
+    flags += [c for c in evaluated_df.columns if c.startswith("meets_3_") and c != "meets_3_30_300"]
     numeric = evaluated_df[[geo_level]].copy()
     for f in flags:
         numeric[f] = evaluated_df[f].astype("Float64")
@@ -293,10 +312,15 @@ def compute_compliance(
     rule_t30_buffer: int | None = None,
     rule_distance: str = "euclidean",
     out_name: str = "T3_30_300_buildings",
+    rule_t3_metric: str = "proximity",
+    visibility_buffers: list[int] | None = None,
 ) -> DataFrame:
     """Evaluate the 3-30-300 rule per building and aggregate the pass rates to geo_level.
 
-    3: T3 count within rule_t3_buffer metres. 30: canopy cover of the
+    3: trees within rule_t3_buffer metres — counted by T3 (rule_t3_metric
+    "proximity") or seen from some floor by Visibility ("visibility"); both
+    flags are kept as meets_3_proximity / meets_3_visibility when their
+    outputs exist. 30: canopy cover of the
     building's sub_geo_level unit (the neighbourhood reading of the rule), or
     T30_buildings canopy within rule_t30_buffer metres when given. 300: park
     distance, straight-line (`euclidean`, the WHO guideline) or road
@@ -307,12 +331,25 @@ def compute_compliance(
         raise ValueError(f"rule_distance must be 'euclidean' or 'network', got {rule_distance!r}")
     distance_col = "distance_euclidean" if rule_distance == "euclidean" else "distance_manhattan"
 
-    tree_sel, tree_col = "", None
+    if rule_t3_metric not in ("proximity", "visibility"):
+        raise ValueError(f"rule_t3_metric must be 'proximity' or 'visibility', got {rule_t3_metric!r}")
+    tree_sel, prox_col, vis_col, vis_join = "", None, None, ""
     if rule_t3_buffer in t3_buffer_lst:
-        tree_col = f"tree_count_{rule_t3_buffer}m"
-        tree_sel = f", t.{tree_col}"
-    else:
+        prox_col = f"tree_count_{rule_t3_buffer}m"
+        tree_sel = f", t.{prox_col}"
+    elif rule_t3_metric == "proximity":
         logger.warning(f"No T3 output for --rule_t3_buffer {rule_t3_buffer}m in {t3_buffer_lst} — meets_3 left null")
+    if rule_t3_buffer in (visibility_buffers or []):
+        vis_col = f"visible_trees_{rule_t3_buffer}m"
+        tree_sel += f", v.visible_trees AS {vis_col}, v.visible_trees_ground AS visible_trees_ground_{rule_t3_buffer}m"
+        vis_join = f"LEFT JOIN visibility_{rule_t3_buffer}m v ON t.building_id = v.building_id"
+    elif rule_t3_metric == "visibility":
+        raise FileNotFoundError(
+            f"--rule_t3_metric visibility needs Visibility output at --rule_t3_buffer {rule_t3_buffer}m "
+            f"(found: {visibility_buffers or []})"
+        )
+    tree_col = vis_col if rule_t3_metric == "visibility" else prox_col
+    by_metric = {m: c for m, c in (("proximity", prox_col), ("visibility", vis_col)) if c is not None}
 
     if rule_t30_buffer is None:
         canopy_col = "canopy_cover"
@@ -335,21 +372,48 @@ def compute_compliance(
         FROM t3_300 t
         JOIN boundaries_buildings_overlay o ON t.building_id = o.building_id
         {canopy_join}
+        {vis_join}
     """).toPandas()
 
-    evaluated = evaluate_rule(buildings_df, tree_col, canopy_col, distance_col)
+    evaluated = evaluate_rule(buildings_df, tree_col, canopy_col, distance_col, by_metric)
     db_dir = Path(cfg.output.base_dir) / "database"
-    evaluated.to_parquet(db_dir / f"{out_name}.parquet", index=False)
+    write_rule_parquet(evaluated, db_dir / f"{out_name}.parquet", {
+        "t3_metric": rule_t3_metric, "t3_col": tree_col, "t30_col": canopy_col, "distance_col": distance_col,
+    })
 
     summary = summarise_rule(evaluated, geo_level)
     compliance_sdf = sedona.createDataFrame(summary)
     compliance_sdf.createOrReplaceTempView("compliance_agg")
     logger.info(
-        f"3-30-300 rule: 3 = T3 {rule_t3_buffer}m, 30 = "
+        f"3-30-300 rule: 3 = {'trees visible within' if rule_t3_metric == 'visibility' else 'T3 trees within'} "
+        f"{rule_t3_buffer}m, 30 = "
         f"{'sub-geo unit canopy' if rule_t30_buffer is None else f'T30_buildings {rule_t30_buffer}m'}, "
         f"300 = {rule_distance} distance; {int(evaluated['meets_3_30_300'].sum())}/{len(evaluated)} buildings pass"
     )
     return compliance_sdf
+
+
+def write_rule_parquet(evaluated: pd.DataFrame, path: Path, rule: dict) -> None:
+    """Per-building rule table with the columns behind each criterion in the `greenpy_rule` metadata."""
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pa.Table.from_pandas(evaluated, preserve_index=False)
+    meta = {**(table.schema.metadata or {}), b"greenpy_rule": json.dumps(rule).encode()}
+    pq.write_table(table.replace_schema_metadata(meta), path)
+
+
+def read_rule_metadata(path: Path) -> dict | None:
+    """The `greenpy_rule` metadata of a per-building rule table (None for tables written before it existed)."""
+    import json
+
+    import pyarrow.parquet as pq
+
+    meta = pq.read_schema(path).metadata or {}
+    raw = meta.get(b"greenpy_rule")
+    return json.loads(raw) if raw else None
 
 
 def merge_t30_and_spectral(sedona: SparkSession, geo_level: str, sub_geo_level: str, has_spectral: bool) -> DataFrame:
@@ -460,7 +524,8 @@ def merge_all(
         extra_sel += "".join(f", tb.building_canopy_cover_{b}m" for b in t30_buildings_buffers)
         extra_join += f"LEFT JOIN t30_buildings_agg tb ON u.{geo_level} = tb.{geo_level}\n"
     if visibility_buffers:
-        extra_sel += "".join(f", va.visible_trees_{b}m" for b in visibility_buffers)
+        va_cols = [c for c in sedona.table("visibility_agg").columns if c != geo_level]
+        extra_sel += "".join(f", va.{c}" for c in va_cols)
         extra_join += f"LEFT JOIN visibility_agg va ON u.{geo_level} = va.{geo_level}\n"
     comp_cols = [c for c in sedona.table("compliance_agg").columns if c != geo_level]
     comp_sel = "".join(f", ca.{c}" for c in comp_cols)
@@ -505,6 +570,7 @@ def process_data(
     rule_t3_buffer: int = 50,
     rule_t30_buffer: int | None = None,
     rule_distance: str = "euclidean",
+    rule_t3_metric: str = "proximity",
 ) -> pd.DataFrame:
     """Run the full merge pipeline and write database/T3_30_300_spectral.parquet.
 
@@ -535,6 +601,7 @@ def process_data(
         sedona, cfg, geo_level, sub_geo_level, t3_buffer_lst, tables["t30_buildings_buffers"],
         rule_t3_buffer=rule_t3_buffer, rule_t30_buffer=rule_t30_buffer, rule_distance=rule_distance,
         out_name=unit_output_name("T3_30_300_buildings", dggs, dggs_resolution),
+        rule_t3_metric=rule_t3_metric, visibility_buffers=tables["visibility_buffers"],
     )
     result_sdf = merge_all(sedona, geo_level, tables["t30_buildings_buffers"], tables["visibility_buffers"])
 
@@ -544,7 +611,8 @@ def process_data(
     leading = [geo_level, "total_trees"] + tree_cols + ["canopy_cover"] + [
         f"building_canopy_cover_{b}m" for b in tables["t30_buildings_buffers"]
     ] + ["park_distance_manhattan", "park_distance_euclidean", "water_distance",
-         "pct_meets_3", "pct_meets_30", "pct_meets_300", "pct_meets_3_30_300"]
+         "pct_meets_3", "pct_meets_30", "pct_meets_300", "pct_meets_3_30_300",
+         "pct_meets_3_proximity", "pct_meets_3_visibility"]
     ordered = [c for c in leading if c in result_df.columns]
     ordered += [c for c in result_df.columns if c not in ordered]
     result_df = result_df[ordered]
