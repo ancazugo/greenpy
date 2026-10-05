@@ -19,7 +19,7 @@ from loguru import logger
 
 from .catalog import BUILDING_KEY, CRITERIA_MET, RULE_FLAGS, Catalog, Source, UnitLayer, describe
 
-STORE_VERSION = 6
+STORE_VERSION = 8
 # building columns holding a census unit's name, e.g. "name:ADM3_code"
 NAME_PREFIX = "name:"
 N_CLASSES = 7
@@ -348,14 +348,85 @@ def metric_stats(con: duckdb.DuckDBPyConnection, table: str, metric: str) -> dic
         """).fetchone()
         if rest_min is not None:
             quantiles = sorted({round(q, 4) for q in [rest_min, *rest_qs]})
+    # every percentile, so the client can draw any number of quantile classes, natural
+    # breaks, log-spaced or rank-stretched colours without another round trip
+    pcts = con.execute(f"SELECT quantile_cont({col}, {[i / 100 for i in range(101)]}) FROM {table} WHERE {finite}").fetchone()[0]
     stats |= {
         "integer": integer,
         "domain": [lo, hi],
         "quantile": quantiles,
         "equal": [round(lo + (hi - lo) * i / N_CLASSES, 4) for i in range(1, N_CLASSES)],
+        "pcts": [round(p, 4) for p in pcts],
         "hist": hist,
     }
     return stats
+
+
+def study_summary(con: duckdb.DuckDBPyConnection, catalog: Catalog, layers: dict, trees: dict | None, parks: dict | None) -> dict:
+    """Whole-study-area figures for the dashboard's summary card.
+
+    Rule criteria are counted over buildings; medians use the metric each
+    criterion tests (Merge's --rule_* choices) when known; canopy cover is
+    computed for the study area as a whole (see _study_canopy).
+    """
+    building_metrics = layers["buildings"]["metrics"]
+    summary = {
+        "buildings": con.execute("SELECT count(*) FROM buildings").fetchone()[0],
+        "trees": trees["count"] if trees else None,
+        "parks": parks,
+        "rule": {},
+        "medians": [],
+        "canopy_cover": None,
+    }
+    for flag in RULE_FLAGS:
+        if flag in building_metrics:
+            summary["rule"][flag] = metric_stats(con, "buildings", flag)
+
+    tested = [catalog.rule_gradients.get(f) for f in RULE_FLAGS[:3]]
+    fallbacks = [
+        next((m for m in building_metrics if m.startswith("tree_count_")), None),
+        next((m for m in building_metrics if m.startswith("building_canopy_cover_")), None),
+        "distance_euclidean" if "distance_euclidean" in building_metrics else None,
+    ]
+    for metric in (t if t in building_metrics else f for t, f in zip(tested, fallbacks)):
+        if metric:
+            median = con.execute(f"SELECT median({_ident(metric)}) FROM buildings").fetchone()[0]
+            summary["medians"].append(asdict(describe(metric)) | {"value": median})
+
+    summary["canopy_cover"] = _study_canopy(con, catalog)
+    return summary
+
+
+def _study_canopy(con: duckdb.DuckDBPyConnection, catalog: Catalog) -> dict | None:
+    """Canopy cover of the whole study area: total canopy over total measured area.
+
+    T30 records each unit's canopy_cover and the area it was measured over
+    (total_pixels: valid CHM pixels, or the unit's area in m² for tree polygons),
+    so canopy = canopy_cover / 100 * total_pixels and the study-area cover is
+    Σ canopy / Σ total_pixels — nodata pixels never enter the denominator. Census
+    units are preferred over DGGS cells (they tile exactly the study area), the
+    finest level first.
+    """
+    census = [u for u in catalog.unit_layers if u.name in catalog.census_levels]
+    grids = [u for u in catalog.unit_layers if u.name not in catalog.census_levels]
+    for layer in [*reversed(census), *grids]:
+        for src in layer.sources:
+            if src.module != "T30" or "total_pixels" not in _source_columns(con, src):
+                continue
+            key = _ident(src.key)
+            row = con.execute(f"""
+                SELECT 100 * sum(cc / 100 * tp) / sum(tp), count(*)
+                FROM (SELECT {key}, any_value(canopy_cover) AS cc, any_value(total_pixels) AS tp
+                      FROM {_reader(src)} WHERE {key} IS NOT NULL GROUP BY {key})
+                WHERE cc IS NOT NULL AND tp > 0
+            """).fetchone()
+            if row[0] is not None:
+                return {"value": row[0], "units": row[1], "layer": layer.label}
+    return None
+
+
+def _source_columns(con: duckdb.DuckDBPyConnection, src: Source) -> list[str]:
+    return con.sql(f"SELECT * FROM {_reader(src)} LIMIT 0").columns
 
 
 def _lonlat_bounds(con: duckdb.DuckDBPyConnection) -> list[float]:
@@ -418,6 +489,7 @@ def build_store(catalog: Catalog, path: Path, include_trees: bool = True) -> Non
             },
             "trees": trees,
             "parks": parks,
+            "summary": study_summary(con, catalog, layers, trees, parks),
         }
         con.execute("CREATE TABLE meta (key VARCHAR PRIMARY KEY, value JSON)")
         con.executemany("INSERT INTO meta VALUES (?, ?)", [[k, json.dumps(v)] for k, v in meta.items()])

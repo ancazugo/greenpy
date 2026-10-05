@@ -1,28 +1,43 @@
 /* greenpy viz — map front end. Plain JS on MapLibre GL; all data comes from the local server. */
 "use strict";
 
-// ColorBrewer ramps (7 classes) and the categorical colours for rule flags. Greens are kept
-// for the tree layer only, so metric colours never read as canopy.
-const RAMPS = {
-  high: ["#eff3ff", "#c6dbef", "#9ecae1", "#6baed6", "#4292c6", "#2171b5", "#084594"], // Blues
-  neutral: ["#ffffd4", "#fee391", "#fec44f", "#fe9929", "#ec7014", "#cc4c02", "#8c2d04"], // YlOrBr
-  diverging: ["#b2182b", "#ef8a62", "#fddbc7", "#d1e5f0", "#67a9cf", "#2166ac"], // RdBu, fail → pass
+// Sequential palettes run low → high. Greens are kept for the tree layer and purples for
+// parks, so metric colours never read as canopy or green space.
+const SEQUENTIAL = {
+  Blues: ["#f7fbff", "#deebf7", "#c6dbef", "#9ecae1", "#6baed6", "#4292c6", "#2171b5", "#08519c", "#08306b"],
+  YlGnBu: ["#ffffd9", "#edf8b1", "#c7e9b4", "#7fcdbb", "#41b6c4", "#1d91c0", "#225ea8", "#253494", "#081d58"],
+  YlOrBr: ["#ffffe5", "#fff7bc", "#fee391", "#fec44f", "#fe9929", "#ec7014", "#cc4c02", "#993404", "#662506"],
+  OrRd: ["#fff7ec", "#fee8c8", "#fdd49e", "#fdbb84", "#fc8d59", "#ef6548", "#d7301f", "#b30000", "#7f0000"],
+  Viridis: ["#440154", "#472d7b", "#3b528b", "#2c728e", "#21918c", "#28ae80", "#5ec962", "#addc30", "#fde725"],
+  Magma: ["#000004", "#1c1044", "#4f127b", "#812581", "#b5367a", "#e55064", "#fb8761", "#fec287", "#fcfdbf"],
+  Cividis: ["#00224e", "#123570", "#3b496c", "#575d6d", "#707173", "#8a8779", "#a69d75", "#c4b56c", "#e4cf5b"],
+  Greys: ["#f7f7f7", "#e5e5e5", "#cccccc", "#b0b0b0", "#969696", "#737373", "#525252", "#333333", "#141414"],
 };
-const PASS = "#2166ac", FAIL = "#b2182b", NODATA = "#c9c4b8", FILTERED = "#e4dfd3";
+// Diverging palettes run fail → pass; the rule view splits them at the 3-30-300 threshold
+const DIVERGING = {
+  RdBu: ["#b2182b", "#ef8a62", "#fddbc7", "#d1e5f0", "#67a9cf", "#2166ac"],
+  PuOr: ["#b35806", "#f1a340", "#fee0b6", "#d8daeb", "#998ec3", "#542788"],
+  BrBG: ["#8c510a", "#d8b365", "#f6e8c3", "#c7eae5", "#5ab4ac", "#01665e"],
+  RdYlBu: ["#d73027", "#fc8d59", "#fee090", "#e0f3f8", "#91bfdb", "#4575b4"],
+};
+const METHODS = {
+  quantile: { label: "Quantile", note: "Each class holds the same number of features." },
+  equal: { label: "Equal interval", note: "Classes split the value range evenly." },
+  jenks: { label: "Natural breaks", note: "Breaks fall in the gaps of the distribution (Jenks)." },
+  log: { label: "Logarithmic", note: "Equal steps on a log scale — spreads out skewed data." },
+  rank: { label: "Continuous (rank)", note: "Colour follows each value's rank, so every part of the distribution gets contrast." },
+  rule: { label: "Rule threshold", note: "Diverging colours split at the 3-30-300 threshold." },
+};
+const NODATA = "#c9c4b8", FILTERED = "#e4dfd3";
 const PARK = "#7b3294", PARK_LINE = "#542788", GRID_LINE = "#3f4a63";
 const GRID_RE = /^(h3|s2|geohash|a5|rhealpix)_\d+$/;
 const INK = "#1d1d1b", PAPER = "#f4f1ea";
 const MODULE_ORDER = ["Rule", "T3", "T30", "T30_buildings", "T300", "Visibility", "Tree_count", "Merge", "Spectral", "Other"];
 
 const BASEMAPS = {
-  paper: { label: "None", style: null },
+  paper: { label: "None (paper)", style: null },
   positron: { label: "OpenFreeMap Positron", style: "https://tiles.openfreemap.org/styles/positron" },
-  carto: {
-    label: "CARTO Light",
-    raster: ["a", "b", "c", "d"].map(s => `https://${s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}@2x.png`),
-    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors © <a href="https://carto.com/attributions">CARTO</a>',
-    maxzoom: 20,
-  },
+  liberty: { label: "OpenFreeMap Liberty", style: "https://tiles.openfreemap.org/styles/liberty" },
   osm: {
     label: "OpenStreetMap",
     raster: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
@@ -30,20 +45,24 @@ const BASEMAPS = {
     maxzoom: 19, saturation: -0.5,
   },
   eox: {
-    label: "Sentinel-2 imagery",
-    note: "non-commercial",
+    label: "Sentinel-2 imagery (non-commercial)",
     raster: ["https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2020_3857/default/g/{z}/{y}/{x}.jpg"],
     attribution: '<a href="https://s2maps.eu">Sentinel-2 cloudless</a> by EOX IT Services GmbH (Copernicus Sentinel data 2020), CC BY-NC-SA 4.0',
     maxzoom: 15, saturation: -0.3,
   },
 };
 
+const target = () => ({
+  visible: true, metric: null, stats: null, flagStats: null, range: null, hidden: new Set(),
+  // view: a rule flag is drawn as a "gradient" of the value it tests, or as plain pass/fail ("flag")
+  view: "gradient",
+  method: "quantile", k: 7, palette: null, diverging: "RdBu", reverse: false,
+});
 const state = {
   catalog: null,
   basemap: "paper",
-  // view: a rule flag is drawn as a "gradient" of the value it tests, or as plain pass/fail ("flag")
-  buildings: { visible: true, metric: null, mode: "quantile", stats: null, flagStats: null, view: "gradient", range: null, hidden: new Set() },
-  units: { visible: false, layer: null, style: "outline", metric: null, mode: "quantile", stats: null, flagStats: null, view: "gradient", range: null, hidden: new Set() },
+  buildings: target(),
+  units: { ...target(), visible: false, layer: null, style: "outline" },
   trees: { visible: false },
   parks: { visible: false },
   outlines: new Set(), // unit layers drawn as boundary lines, independent of the fill layer
@@ -56,11 +75,12 @@ const tileUrl = (layer, metric) => `${location.origin}/tiles/${encodeURIComponen
 const getJSON = url => fetch(url).then(r => (r.ok ? r.json() : null));
 const statsFor = (layer, m) => (m ? getJSON(`/api/stats/${encodeURIComponent(layer)}/${encodeURIComponent(m)}`) : Promise.resolve(null));
 const unitLayerNames = () => Object.keys(state.catalog.layers).filter(k => k !== "buildings");
+const layerKey = t => (t === "buildings" ? "buildings" : "units");
 
 /** What a target draws: a rule flag in gradient view shows the metric it tests. */
-function drawn(target) {
-  const s = state[target];
-  const layer = target === "buildings" ? "buildings" : s.layer;
+function drawn(t) {
+  const s = state[t];
+  const layer = t === "buildings" ? "buildings" : s.layer;
   const base = layer && s.metric ? metricInfo(layer, s.metric) : null;
   const flag = base && base.kind === "boolean" && base.gradient && s.view === "gradient" ? base : null;
   return { layer, base, flag, info: flag ? metricInfo(layer, base.gradient) : base };
@@ -79,10 +99,9 @@ function fmt(value, info) {
   const a = Math.abs(value);
   return a >= 1000 ? Math.round(value).toLocaleString() : a >= 1 ? value.toFixed(2) : value.toPrecision(3);
 }
-
 const tick = (v, info) => fmt(v, info).replace(" %", "%").replace(" m", "");
 
-/* ---------- classification ---------- */
+/* ---------- colour ---------- */
 
 function sample(ramp, n) {
   if (n >= ramp.length) return ramp.slice();
@@ -90,14 +109,105 @@ function sample(ramp, n) {
   return Array.from({ length: n }, (_, i) => ramp[Math.round((i * (ramp.length - 1)) / (n - 1))]);
 }
 
-/** Class breaks and colours for a numeric metric: {breaks: [b1..bk-1], colors: [c0..ck-1]} */
-function classify(info, stats, mode) {
-  if (!stats.domain) return { breaks: [], colors: [NODATA] };
+function hexMix(a, b, f) {
+  const p = h => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
+  const [x, y] = [p(a), p(b)];
+  return "#" + x.map((v, i) => Math.round(v + (y[i] - v) * f).toString(16).padStart(2, "0")).join("");
+}
+
+/** Colour at fraction f (0-1) along a ramp, interpolated. */
+function rampAt(ramp, f) {
+  const x = Math.max(0, Math.min(1, f)) * (ramp.length - 1);
+  const i = Math.min(Math.floor(x), ramp.length - 2);
+  return hexMix(ramp[i], ramp[i + 1], x - i);
+}
+
+/** The target's sequential ramp, oriented so the "good" end is darkest. */
+function sequentialRamp(s, info) {
+  const name = s.palette || (info.better ? "Blues" : "YlOrBr");
+  let ramp = SEQUENTIAL[name] || SEQUENTIAL.Blues;
+  if (info.better === "low") ramp = ramp.slice().reverse();
+  return s.reverse ? ramp.slice().reverse() : ramp;
+}
+
+function divergingRamp(s) {
+  const ramp = DIVERGING[s.diverging] || DIVERGING.RdBu;
+  return s.reverse ? ramp.slice().reverse() : ramp;
+}
+
+const passColor = s => divergingRamp(s)[5];
+const failColor = s => divergingRamp(s)[0];
+
+/* ---------- class breaks ---------- */
+
+/** Values at the server's 101 percentiles (older stores lack them: fall back to their quantiles). */
+const pcts = stats => stats.pcts || [stats.domain[0], ...stats.quantile, stats.domain[1]];
+
+function cleanBreaks(bs, stats) {
+  const [lo, hi] = stats.domain;
+  const r = b => (stats.integer ? Math.round(b) : +b.toPrecision(6));
+  return [...new Set(bs.map(r))].filter(b => b > lo && b <= hi).sort((a, b) => a - b);
+}
+
+function quantileBreaks(stats, k) {
+  const p = pcts(stats);
+  const at = q => p[Math.round(q * (p.length - 1))];
+  let breaks = cleanBreaks(Array.from({ length: k - 1 }, (_, i) => at((i + 1) / k)), stats);
+  if (breaks.length < Math.min(3, k - 1)) {
+    // one value (often 0) dominates: it keeps its own class and the rest split the values above it
+    const above = p.filter(v => v > p[0]);
+    if (above.length) {
+      const q = f => above[Math.round(f * (above.length - 1))];
+      breaks = cleanBreaks([above[0], ...Array.from({ length: k - 2 }, (_, i) => q((i + 1) / (k - 1)))], stats);
+    }
+  }
+  return breaks;
+}
+
+function logBreaks(stats, k) {
+  const [lo, hi] = stats.domain;
+  const top = Math.log1p(hi - lo);
+  return cleanBreaks(Array.from({ length: k - 1 }, (_, i) => lo + Math.expm1((top * (i + 1)) / k)), stats);
+}
+
+/** Fisher-Jenks natural breaks over the percentile values (each stands for 1 % of the features). */
+function jenksBreaks(stats, k) {
+  const v = pcts(stats).slice().sort((a, b) => a - b);
+  const n = v.length;
+  if (n <= k) return cleanBreaks(v.slice(1), stats);
+  const lower = Array.from({ length: n + 1 }, () => new Array(k + 1).fill(0));
+  const cost = Array.from({ length: n + 1 }, () => new Array(k + 1).fill(Infinity));
+  for (let j = 1; j <= k; j++) { lower[1][j] = 1; cost[1][j] = 0; }
+  for (let l = 2; l <= n; l++) {
+    let s1 = 0, s2 = 0, w = 0, var_ = 0;
+    for (let m = 1; m <= l; m++) {
+      const i3 = l - m + 1, val = v[i3 - 1];
+      s2 += val * val; s1 += val; w++;
+      var_ = s2 - (s1 * s1) / w;
+      if (i3 > 1) {
+        for (let j = 2; j <= k; j++) {
+          if (cost[l][j] >= var_ + cost[i3 - 1][j - 1]) { lower[l][j] = i3; cost[l][j] = var_ + cost[i3 - 1][j - 1]; }
+        }
+      }
+    }
+    lower[l][1] = 1; cost[l][1] = var_;
+  }
+  const breaks = [];
+  let idx = n;
+  for (let j = k; j >= 2; j--) { idx = lower[idx][j] - 1; breaks.unshift(v[idx]); }
+  return cleanBreaks(breaks, stats);
+}
+
+/**
+ * How a numeric metric is coloured: stepped classes {breaks, colors} or, for the rank method,
+ * continuous {stops, colors} interpolated between percentile values.
+ */
+function classify(info, stats, s) {
+  if (!stats || !stats.domain) return { breaks: [], colors: [NODATA] };
   const [lo, hi] = stats.domain;
   const integer = !!stats.integer;
-  const clean = bs => [...new Set(bs.map(b => (integer ? Math.round(b) : +b.toPrecision(6))))].filter(b => b > lo && b <= hi).sort((a, b) => a - b);
 
-  if (mode === "rule" && info.threshold !== null) {
+  if (s.method === "rule" && info.threshold !== null) {
     const t = info.threshold;
     // three classes either side of the rule threshold, which is always a break
     const below = [1 / 3, 2 / 3].map(f => lo + (t - lo) * f).filter(b => b < t);
@@ -106,39 +216,63 @@ function classify(info, stats, mode) {
     const tBreak = info.better === "low" ? (integer ? t + 1 : t + 1e-9) : t;
     const breaks = [...new Set([...below.map(b => (integer ? Math.ceil(b) : b)), tBreak, ...above.map(b => (integer ? Math.ceil(b) : b))])].sort((a, b) => a - b);
     const nBelow = breaks.filter(b => b <= tBreak).length;
-    const fail = RAMPS.diverging.slice(0, 3), pass = RAMPS.diverging.slice(3);
+    const ramp = divergingRamp(s);
+    const fail = ramp.slice(0, 3), pass = ramp.slice(3);
     let colors;
     if (info.better === "low") colors = [...pass.slice().reverse().slice(0, nBelow), ...fail.slice().reverse().slice(0, breaks.length + 1 - nBelow)];
     else colors = [...fail.slice(3 - nBelow), ...pass.slice(0, breaks.length + 1 - nBelow)];
     return { breaks, colors, threshold: t };
   }
-  const base = info.better === "high" ? RAMPS.high : info.better === "low" ? RAMPS.high.slice().reverse() : RAMPS.neutral;
-  let breaks = clean(mode === "equal" ? stats.equal : stats.quantile);
-  // never more classes than the ramp has colours
-  if (breaks.length >= base.length) breaks = sample(breaks, base.length - 1);
-  return { breaks, colors: sample(base, breaks.length + 1) };
+
+  const ramp = sequentialRamp(s, info);
+  if (s.method === "rank") {
+    // stops every 5th percentile; colour position = rank, so skewed data still spans the ramp
+    const p = pcts(stats);
+    const stops = [], colors = [];
+    for (let i = 0; i < p.length; i += Math.max(1, Math.round((p.length - 1) / 20))) {
+      if (stops.length && p[i] <= stops[stops.length - 1]) continue;
+      stops.push(p[i]);
+      colors.push(rampAt(ramp, i / (p.length - 1)));
+    }
+    return stops.length > 1 ? { stops, colors, continuous: true } : { breaks: [], colors: [ramp[ramp.length - 1]] };
+  }
+  const k = Math.max(2, Math.min(9, s.k));
+  const breaks = s.method === "equal" ? cleanBreaks(Array.from({ length: k - 1 }, (_, i) => lo + ((hi - lo) * (i + 1)) / k), stats)
+    : s.method === "log" ? logBreaks(stats, k)
+    : s.method === "jenks" ? jenksBreaks(stats, k)
+    : quantileBreaks(stats, k);
+  return { breaks, colors: sample(ramp, breaks.length + 1) };
 }
 
 function colorForValue(v, cls) {
+  if (cls.continuous) {
+    const { stops, colors } = cls;
+    if (v <= stops[0]) return colors[0];
+    for (let i = 1; i < stops.length; i++) {
+      if (v <= stops[i]) return hexMix(colors[i - 1], colors[i], (v - stops[i - 1]) / (stops[i] - stops[i - 1]));
+    }
+    return colors[colors.length - 1];
+  }
   let i = 0;
   while (i < cls.breaks.length && v >= cls.breaks[i]) i++;
   return cls.colors[Math.min(i, cls.colors.length - 1)];
 }
 
-/** MapLibre fill-color expression for a layer state (handles nulls, booleans and the brush). */
+/** MapLibre fill-color expression for a target (handles nulls, booleans and the brush). */
 function colorExpression(info, stats, s) {
   const v = ["get", info.name];
   if (info.kind === "boolean") {
     const col = (val, c) => (s.hidden.has(String(val)) ? FILTERED : c);
-    return ["case", ["==", v, true], col(true, PASS), ["==", v, false], col(false, FAIL), col(null, NODATA)];
+    return ["case", ["==", v, true], col(true, passColor(s)), ["==", v, false], col(false, failColor(s)), col(null, NODATA)];
   }
-  const cls = classify(info, stats, s.mode);
-  const step = cls.breaks.length ? ["step", ["to-number", v], cls.colors[0], ...cls.breaks.flatMap((b, i) => [b, cls.colors[i + 1]])] : cls.colors[0];
-  let expr = step;
+  const cls = classify(info, stats, s);
+  const num = ["to-number", v];
+  let expr;
+  if (cls.continuous) expr = ["interpolate", ["linear"], num, ...cls.stops.flatMap((b, i) => [b, cls.colors[i]])];
+  else expr = cls.breaks.length ? ["step", num, cls.colors[0], ...cls.breaks.flatMap((b, i) => [b, cls.colors[i + 1]])] : cls.colors[0];
   if (s.range) {
     const [a, b] = s.range;
-    const inRange = ["all", [">=", ["to-number", v], a], ["<=", ["to-number", v], b]];
-    expr = ["case", inRange, step, FILTERED];
+    expr = ["case", ["all", [">=", num, a], ["<=", num, b]], expr, FILTERED];
   }
   return ["case", ["==", v, null], s.range ? FILTERED : NODATA, expr];
 }
@@ -192,11 +326,12 @@ function dataLayers() {
   const u = state.units, fill = u.style === "fill";
   const layers = [];
   if (state.units.layer) {
+    const d = drawn("units");
     layers.push({
       id: "gp-units-fill", type: "fill", source: "units", "source-layer": "features",
       layout: { visibility: vis(u.visible) },
       paint: {
-        "fill-color": fill && u.stats ? colorExpression(drawn("units").info, u.stats, u) : PAPER,
+        "fill-color": fill && u.stats && d.info ? colorExpression(d.info, u.stats, u) : PAPER,
         // outline mode keeps an invisible fill so units stay clickable
         "fill-opacity": fill ? ["interpolate", ["linear"], ["zoom"], 12, 0.85, 15, 0.3] : 0,
       },
@@ -301,24 +436,30 @@ function refreshLayer(which) {
   }
 }
 
+/** Repaint a target's layer and redraw its sidebar controls and legend. */
+function restyle(t) {
+  refreshLayer(layerKey(t));
+  renderPanel(t);
+  saveView();
+}
+
 /* ---------- metric switching ---------- */
 
-async function setMetric(target, metric) {
-  const s = state[target];
+async function setMetric(t, metric) {
+  const s = state[t];
   s.metric = metric;
   s.range = null;
   s.hidden = new Set();
-  const d = drawn(target);
-  // a flag's gradient centres on its threshold, like the park distance in Rule mode
-  if (d.flag) s.mode = "rule";
-  if (s.mode === "rule" && d.info.threshold === null) s.mode = "quantile";
+  const d = drawn(t);
+  // a flag's gradient centres on its threshold, like the park distance in rule mode
+  if (d.flag) s.method = "rule";
+  if (s.method === "rule" && (!d.info || d.info.threshold === null)) s.method = "quantile";
   // switch tiles before awaiting the stats: tiles requested meanwhile (e.g. while panning)
   // would otherwise come from the old URL and lack the new metric
-  const src = map.getSource(target);
-  if (src) src.setTiles([tileUrl(d.layer, d.info.name)]);
-  [s.stats, s.flagStats] = await Promise.all([statsFor(d.layer, d.info.name), d.flag ? statsFor(d.layer, d.flag.name) : null]);
-  refreshLayer(target === "buildings" ? "buildings" : "units");
-  renderLegend();
+  const src = map.getSource(t);
+  if (src && d.info) src.setTiles([tileUrl(d.layer, d.info.name)]);
+  [s.stats, s.flagStats] = await Promise.all([statsFor(d.layer, d.info && d.info.name), d.flag ? statsFor(d.layer, d.flag.name) : null]);
+  restyle(t);
 }
 
 function fillMetricSelect(select, layer, current) {
@@ -340,185 +481,178 @@ function defaultMetric(layer) {
   return prefs.find(p => ms.includes(p)) || ms.find(m => /tree_count_\d+m$/.test(m)) || ms.find(m => m === "canopy_cover") || ms[0] || null;
 }
 
-/* ---------- legend ---------- */
+/* ---------- sidebar panels: colour controls + legend per target ---------- */
 
-function renderLegend() {
-  const legend = $("legend");
-  legend.innerHTML = "";
-  if (state.buildings.visible && state.buildings.metric) legend.append(legendBlock("buildings"));
-  if (state.units.visible && state.units.style === "fill" && state.units.metric) legend.append(legendBlock("units"));
-  if (state.parks.visible && state.catalog.parks) legend.append(parksLegend());
-}
-
-function parksLegend() {
-  const p = state.catalog.parks;
-  const block = document.createElement("div");
-  block.className = "legend-block";
-  const min = p.min_area_ha ? `≥ ${p.min_area_ha} ha` : "all";
-  block.innerHTML = `<h3>Parks</h3><div class="sub">green spaces used for 300 (${min})</div><div class="cats">
-    <div class="cat"><span class="swatch" style="background:${PARK};opacity:.55;border:1.5px solid ${PARK_LINE}"></span><span>Counted for 300</span><span>${p.used.toLocaleString()}</span></div>
-    ${p.count > p.used ? `<div class="cat"><span class="swatch dashed" style="border-color:${PARK}"></span><span>Smaller, ignored</span><span>${(p.count - p.used).toLocaleString()}</span></div>` : ""}
-  </div>`;
-  return block;
-}
-
-function viewControl(target) {
-  const s = state[target];
-  const seg = document.createElement("div");
-  seg.className = "seg";
-  for (const [view, label] of [["gradient", "Gradient"], ["flag", "Pass / fail"]]) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.textContent = label;
-    b.className = s.view === view ? "on" : "";
-    b.onclick = () => { s.view = view; setMetric(target, s.metric); saveView(); };
-    seg.append(b);
+function el(tag, attrs = {}, text) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v;
+    else if (k.startsWith("on")) e[k] = v;
+    else e.setAttribute(k, v);
   }
-  return seg;
+  if (text !== undefined) e.textContent = text;
+  return e;
 }
 
-function passFail(stats) {
-  const row = document.createElement("div");
-  row.className = "passfail";
+function selectOf(options, value, onchange, attrs = {}) {
+  const sel = el("select", attrs);
+  for (const [v, label, group] of options) {
+    let parent = sel;
+    if (group) parent = sel.querySelector(`optgroup[label="${group}"]`) || sel.appendChild(el("optgroup", { label: group }));
+    parent.append(new Option(label, v, false, v === value));
+  }
+  sel.onchange = () => onchange(sel.value);
+  return sel;
+}
+
+function rampPreview(colors) {
+  const bar = el("div", { class: "ramp-preview" });
+  for (const c of colors) { const sw = el("span"); sw.style.background = c; bar.append(sw); }
+  return bar;
+}
+
+function renderPanel(t) {
+  const panel = $(`${t}-panel`);
+  panel.innerHTML = "";
+  const s = state[t];
+  const { base, flag, info } = drawn(t);
+  if (!base) return;
+
+  if (base.kind === "boolean" && base.gradient) {
+    const seg = el("div", { class: "seg" });
+    for (const [view, label] of [["gradient", "Gradient"], ["flag", "Pass / fail"]]) {
+      seg.append(el("button", { type: "button", class: s.view === view ? "on" : "", onclick: () => { s.view = view; setMetric(t, s.metric); } }, label));
+    }
+    panel.append(seg);
+  }
+  if (flag && s.flagStats) panel.append(passFail(s.flagStats, s));
+  panel.append(styleControls(t, info));
+  const legend = el("div", { class: "legend" });
+  if (s.stats) legend.append(info.kind === "boolean" ? categories(t) : histogramBlock(t, info));
+  if (t === "buildings" && map && map.getZoom() < state.catalog.min_zoom.buildings) {
+    legend.append(el("p", { class: "note" }, `Buildings appear from zoom ${state.catalog.min_zoom.buildings} — zoom in, or fill the areas below.`));
+  }
+  panel.append(legend);
+}
+
+function styleControls(t, info) {
+  const s = state[t];
+  const grid = el("div", { class: "style-grid" });
+  const boolean = info.kind === "boolean";
+  const rule = boolean || s.method === "rule";
+
+  grid.append(el("span", { class: "label" }, "Colours"));
+  const palettes = rule ? Object.keys(DIVERGING) : Object.keys(SEQUENTIAL);
+  const current = rule ? s.diverging : s.palette || (info.better ? "Blues" : "YlOrBr");
+  const pal = selectOf(palettes.map(p => [p, p]), current, v => { rule ? (s.diverging = v) : (s.palette = v); restyle(t); }, { "aria-label": "Palette" });
+  const flip = el("button", { type: "button", class: "flip" + (s.reverse ? " on" : ""), title: "Reverse the colour ramp", onclick: () => { s.reverse = !s.reverse; restyle(t); } }, "Reverse");
+  grid.append(pal, flip);
+  const preview = rule ? divergingRamp(s) : sequentialRamp(s, info);
+  const pv = rampPreview(boolean ? [failColor(s), passColor(s)] : preview);
+  pv.style.gridColumn = "1 / -1";
+  grid.append(pv);
+
+  if (!boolean) {
+    grid.append(el("span", { class: "label" }, "Classes"));
+    const methods = Object.entries(METHODS).filter(([m]) => m !== "rule" || info.threshold !== null);
+    grid.append(selectOf(methods.map(([m, d]) => [m, d.label]), s.method, v => { s.method = v; s.range = null; restyle(t); }, { "aria-label": "Classification" }));
+    const ks = [3, 4, 5, 6, 7, 8, 9].map(k => [String(k), `${k}`]);
+    const ksel = selectOf(ks, String(s.k), v => { s.k = +v; restyle(t); }, { class: "k", "aria-label": "Number of classes", title: "Number of classes" });
+    ksel.disabled = s.method === "rule" || s.method === "rank";
+    grid.append(ksel);
+    grid.append(el("p", { class: "method-note" }, s.method === "rule" ? `Split at ${tick(info.threshold, info)} — ${info.better === "low" ? "at or below" : "at or above"} meets the rule.` : METHODS[s.method].note));
+  }
+  return grid;
+}
+
+function passFail(stats, s) {
+  const row = el("div", { class: "passfail" });
   const n = stats.true + stats.false;
   const pct = n ? Math.round((100 * stats.true) / n) : 0;
-  row.innerHTML = `<span class="swatch" style="background:${PASS}"></span><span>${stats.true.toLocaleString()} meet (${pct}%)</span>
-    <span class="swatch" style="background:${FAIL}"></span><span>${stats.false.toLocaleString()} don't</span>`;
+  row.innerHTML = `<span class="swatch" style="background:${passColor(s)}"></span><span>${stats.true.toLocaleString()} meet (${pct}%)</span>
+    <span class="swatch" style="background:${failColor(s)}"></span><span>${stats.false.toLocaleString()} don't</span>`;
   return row;
 }
 
-function legendBlock(target) {
-  const s = state[target];
-  const { layer, base, flag, info } = drawn(target);
-  const total = state.catalog.layers[layer];
-  const block = document.createElement("div");
-  block.className = "legend-block";
-  block.innerHTML = `<h3></h3><div class="sub"></div>`;
-  block.querySelector("h3").textContent = base.label;
-  block.querySelector(".sub").textContent = (target === "buildings" ? "per building" : `per unit · ${total.label}`)
-    + (flag ? ` · shaded by ${info.label[0].toLowerCase()}${info.label.slice(1)}` : "");
-  if (base.kind === "boolean" && base.gradient) block.append(viewControl(target));
-  if (!s.stats) return block;
-  if (flag && s.flagStats) block.append(passFail(s.flagStats));
-
-  if (info.kind === "boolean") {
-    const cats = document.createElement("div");
-    cats.className = "cats";
-    for (const [key, label, color, n] of [["true", "Meets", PASS, s.stats.true], ["false", "Does not meet", FAIL, s.stats.false], ["null", "No data", NODATA, s.stats.null]]) {
-      if (!n && key === "null") continue;
-      const row = document.createElement("div");
-      row.className = "cat" + (s.hidden.has(key) ? " off" : "");
-      row.title = "Click to fade / restore";
-      row.innerHTML = `<span class="swatch" style="background:${color}"></span><span>${label}</span><span>${n.toLocaleString()}</span>`;
-      row.onclick = () => {
-        s.hidden.has(key) ? s.hidden.delete(key) : s.hidden.add(key);
-        refreshLayer(target === "buildings" ? "buildings" : "units");
-        renderLegend();
-      };
-      cats.append(row);
-    }
-    block.append(cats);
-  } else {
-    block.append(modeControl(target, info), histogram(target, info));
-    const foot = document.createElement("div");
-    foot.className = "legend-foot";
-    const shown = s.range ? countInRange(s) : null;
-    const left = document.createElement("span");
-    left.textContent = shown === null
-      ? `${(s.stats.n - s.stats.null).toLocaleString()} ${target === "buildings" ? "buildings" : "units"}` + (s.stats.null ? ` · ${s.stats.null.toLocaleString()} no data` : "")
-      : `${shown.toLocaleString()} of ${(s.stats.n - s.stats.null).toLocaleString()} shown`;
-    foot.append(left);
-    if (s.range) {
-      const clear = document.createElement("a");
-      clear.textContent = "clear";
-      clear.onclick = () => { s.range = null; refreshLayer(target === "buildings" ? "buildings" : "units"); renderLegend(); };
-      foot.append(clear);
-    } else {
-      const hint = document.createElement("span");
-      hint.textContent = "drag to filter";
-      foot.append(hint);
-    }
-    block.append(foot);
+function categories(t) {
+  const s = state[t];
+  const cats = el("div", { class: "cats" });
+  for (const [key, label, color, n] of [["true", "Meets", passColor(s), s.stats.true], ["false", "Does not meet", failColor(s), s.stats.false], ["null", "No data", NODATA, s.stats.null]]) {
+    if (!n && key === "null") continue;
+    const row = el("div", { class: "cat" + (s.hidden.has(key) ? " off" : ""), title: "Click to fade / restore" });
+    row.innerHTML = `<span class="swatch" style="background:${color}"></span><span>${label}</span><span>${n.toLocaleString()}</span>`;
+    row.onclick = () => { s.hidden.has(key) ? s.hidden.delete(key) : s.hidden.add(key); restyle(t); };
+    cats.append(row);
   }
-  if (target === "buildings" && map.getZoom() < state.catalog.min_zoom.buildings) {
-    const note = document.createElement("p");
-    note.className = "note";
-    note.textContent = `Buildings appear from zoom ${state.catalog.min_zoom.buildings} — zoom in, or show units.`;
-    block.append(note);
+  return cats;
+}
+
+/**
+ * Histogram bins in value space. Linear scales use the server's exact counts; the log
+ * method redraws them on a log axis from the percentiles, so counts there are estimates.
+ */
+function bins(stats, method) {
+  const [lo, hi] = stats.domain;
+  const n = stats.n - stats.null;
+  if (method !== "log" || !stats.pcts) {
+    const w = (hi - lo) / stats.hist.length;
+    return { exact: true, scale: v => (v - lo) / (hi - lo), bins: stats.hist.map((c, i) => ({ x0: lo + i * w, x1: lo + (i + 1) * w, count: c })) };
   }
-  return block;
+  const top = Math.log1p(hi - lo), N = 30;
+  const p = stats.pcts;
+  const cdf = x => {
+    if (x <= p[0]) return 0;
+    if (x >= p[p.length - 1]) return 1;
+    let i = 1;
+    while (p[i] < x) i++;
+    const span = p[i] - p[i - 1];
+    return (i - 1 + (span ? (x - p[i - 1]) / span : 1)) / (p.length - 1);
+  };
+  const edge = i => lo + Math.expm1((top * i) / N);
+  return {
+    exact: false,
+    scale: v => Math.log1p(Math.max(0, v - lo)) / top,
+    bins: Array.from({ length: N }, (_, i) => ({ x0: edge(i), x1: edge(i + 1), count: Math.round(n * (cdf(edge(i + 1)) - cdf(edge(i)))) })),
+  };
 }
 
-function modeControl(target, info) {
-  const s = state[target];
-  const seg = document.createElement("div");
-  seg.className = "seg";
-  for (const [mode, label] of [["quantile", "Quantile"], ["equal", "Equal"], ["rule", info.threshold !== null ? `Rule ${tick(info.threshold, info)}` : "Rule"]]) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.textContent = label;
-    b.className = s.mode === mode ? "on" : "";
-    b.disabled = mode === "rule" && info.threshold === null;
-    b.title = mode === "rule" ? "Diverging colours centred on the 3-30-300 threshold" : "";
-    b.onclick = () => { s.mode = mode; refreshLayer(target === "buildings" ? "buildings" : "units"); renderLegend(); };
-    seg.append(b);
-  }
-  return seg;
-}
-
-function binEdges(stats) {
-  const [lo, hi] = stats.domain, n = stats.hist.length, w = (hi - lo) / n;
-  return { lo, hi, n, w };
-}
-
-function countInRange(s) {
-  const { lo, w } = binEdges(s.stats);
-  const [a, b] = s.range;
-  return s.stats.hist.reduce((acc, c, i) => {
-    const mid = lo + (i + 0.5) * w;
-    return acc + (mid >= a && mid <= b ? c : 0);
-  }, 0);
-}
-
-function histogram(target, info) {
-  const s = state[target];
+function histogramBlock(t, info) {
+  const s = state[t];
+  const wrap = el("div");
+  if (!s.stats.domain) { wrap.append(el("p", { class: "note" }, "No values to show.")); return wrap; }
+  const B = bins(s.stats, s.method);
+  const cls = classify(info, s.stats, s);
   const NS = "http://www.w3.org/2000/svg";
-  const W = 240, H = 64, top = 4, base = 44;
+  const W = 280, H = 64, top = 4, base = 44;
   const svg = document.createElementNS(NS, "svg");
   svg.setAttribute("class", "hist");
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.setAttribute("preserveAspectRatio", "none");
-  if (!s.stats.domain) return svg;
-  const { lo, hi, n, w } = binEdges(s.stats);
-  const max = Math.max(...s.stats.hist, 1);
-  const cls = classify(info, s.stats, s.mode);
-  const bw = W / n;
-  const x = v => ((v - lo) / (hi - lo)) * W;
-  const el = (tag, attrs) => {
+  const add = (tag, attrs) => {
     const e = document.createElementNS(NS, tag);
     for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
     svg.append(e);
     return e;
   };
-
-  s.stats.hist.forEach((c, i) => {
-    const mid = lo + (i + 0.5) * w;
-    const h = c ? Math.max(1, (Math.sqrt(c) / Math.sqrt(max)) * (base - top)) : 0;
-    const inRange = !s.range || (mid >= s.range[0] && mid <= s.range[1]);
-    el("rect", { x: i * bw + 0.5, y: base - h, width: bw - 1, height: h, fill: inRange ? colorForValue(mid, cls) : FILTERED, stroke: inRange ? "rgba(29,29,27,.35)" : "none", "stroke-width": 0.5 });
+  const x = v => B.scale(v) * W;
+  const [lo, hi] = s.stats.domain;
+  const n = B.bins.length;
+  const bw = W / n;
+  const max = Math.max(...B.bins.map(b => b.count), 1);
+  const inRange = b => !s.range || ((b.x0 + b.x1) / 2 >= s.range[0] && (b.x0 + b.x1) / 2 <= s.range[1]);
+  B.bins.forEach((b, i) => {
+    const h = b.count ? Math.max(1, (Math.sqrt(b.count) / Math.sqrt(max)) * (base - top)) : 0;
+    const on = inRange(b);
+    add("rect", { x: i * bw + 0.5, y: base - h, width: Math.max(bw - 1, 0.5), height: h, fill: on ? colorForValue((b.x0 + b.x1) / 2, cls) : FILTERED, stroke: on ? "rgba(29,29,27,.35)" : "none", "stroke-width": 0.5 });
   });
-  el("line", { class: "axis", x1: 0, x2: W, y1: base + 0.5, y2: base + 0.5 });
-  for (const b of cls.breaks) if (b > lo && b < hi) el("line", { class: "axis", x1: x(b), x2: x(b), y1: base, y2: base + 4 });
-  if (info.threshold !== null && info.threshold > lo && info.threshold < hi) {
-    el("line", { class: "threshold", x1: x(info.threshold), x2: x(info.threshold), y1: top - 4, y2: base + 4 });
-  }
-  const label = (v, anchor, xx) => { const t = el("text", { x: xx, y: H - 4, "text-anchor": anchor }); t.textContent = tick(v, info); };
+  add("line", { class: "axis", x1: 0, x2: W, y1: base + 0.5, y2: base + 0.5 });
+  for (const b of cls.breaks || []) if (b > lo && b < hi) add("line", { class: "axis", x1: x(b), x2: x(b), y1: base, y2: base + 4 });
+  const showT = info.threshold !== null && info.threshold > lo && info.threshold < hi;
+  if (showT) add("line", { class: "threshold", x1: x(info.threshold), x2: x(info.threshold), y1: top - 4, y2: base + 4 });
+  const label = (v, anchor, xx) => { add("text", { x: xx, y: H - 4, "text-anchor": anchor }).textContent = tick(v, info); };
   label(lo, "start", 0);
-  label(s.stats.integer ? hi - w : hi, "end", W);
-  if (info.threshold !== null && info.threshold > lo && info.threshold < hi) {
-    const tx = x(info.threshold);
-    if (tx > 30 && tx < W - 30) label(info.threshold, "middle", tx);
-  }
+  label(s.stats.integer && B.exact ? hi - (hi - lo) / n : hi, "end", W);
+  if (showT && x(info.threshold) > 30 && x(info.threshold) < W - 30) label(info.threshold, "middle", x(info.threshold));
 
   // brush: drag across bins to keep only that value range
   let start = null;
@@ -526,22 +660,116 @@ function histogram(target, info) {
     const r = svg.getBoundingClientRect();
     return Math.max(0, Math.min(n - 1, Math.floor(((ev.clientX - r.left) / r.width) * n)));
   };
-  const rangeOf = (a, b) => {
-    const [i, j] = [Math.min(a, b), Math.max(a, b)];
-    // the end bins also hold the outliers beyond the 0.5-99.5 % domain
-    return [i === 0 ? -Infinity : lo + i * w, j === n - 1 ? Infinity : lo + (j + 1) * w];
-  };
   svg.addEventListener("pointerdown", ev => { start = binAt(ev); svg.setPointerCapture(ev.pointerId); });
   svg.addEventListener("pointerup", ev => {
     if (start === null) return;
-    const end = binAt(ev);
-    s.range = rangeOf(start, end);
-    if (s.range[0] === -Infinity && s.range[1] === Infinity) s.range = null;
+    const [i, j] = [Math.min(start, binAt(ev)), Math.max(start, binAt(ev))];
     start = null;
-    refreshLayer(target === "buildings" ? "buildings" : "units");
-    renderLegend();
+    // the end bins also hold the outliers beyond the 0.5-99.5 % domain
+    s.range = i === 0 && j === n - 1 ? null : [i === 0 ? -Infinity : B.bins[i].x0, j === n - 1 ? Infinity : B.bins[j].x1];
+    restyle(t);
   });
-  return svg;
+  wrap.append(svg);
+
+  const foot = el("div", { class: "legend-foot" });
+  const valid = s.stats.n - s.stats.null;
+  const noun = t === "buildings" ? "buildings" : "areas";
+  if (s.range) {
+    const shown = B.bins.filter(inRange).reduce((a, b) => a + b.count, 0);
+    foot.append(el("span", {}, `${B.exact ? "" : "≈ "}${shown.toLocaleString()} of ${valid.toLocaleString()} shown`));
+    foot.append(el("a", { onclick: () => { s.range = null; restyle(t); } }, "clear"));
+  } else {
+    foot.append(el("span", {}, `${valid.toLocaleString()} ${noun}` + (s.stats.null ? ` · ${s.stats.null.toLocaleString()} no data` : "")));
+    foot.append(el("span", {}, "drag to filter"));
+  }
+  wrap.append(foot);
+  return wrap;
+}
+
+function renderParksLegend() {
+  const box = $("parks-legend");
+  box.innerHTML = "";
+  const p = state.catalog.parks;
+  if (!p || !state.parks.visible) return;
+  const min = p.min_area_ha ? `≥ ${p.min_area_ha} ha` : "all sizes";
+  box.innerHTML = `<div class="cats">
+    <div class="cat"><span class="swatch" style="background:${PARK};opacity:.55;border:1.5px solid ${PARK_LINE}"></span><span>Counted for 300 (${min})</span><span>${p.used.toLocaleString()}</span></div>
+    ${p.count > p.used ? `<div class="cat"><span class="swatch dashed" style="border-color:${PARK}"></span><span>Smaller, ignored</span><span>${(p.count - p.used).toLocaleString()}</span></div>` : ""}
+  </div>`;
+}
+
+/* ---------- study-area summary ---------- */
+
+function renderSummary() {
+  const sm = state.catalog.summary;
+  const box = $("summary");
+  if (!sm) return;
+  box.hidden = false;
+  // on a phone the card would cover most of the map, so it starts folded
+  const pref = loadPref("summaryCollapsed");
+  const collapsed = pref === undefined ? window.innerWidth <= 720 : pref === true;
+  box.classList.toggle("collapsed", collapsed);
+  const figures = [["Buildings", sm.buildings.toLocaleString()]];
+  if (sm.trees !== null) figures.push(["Trees", sm.trees.toLocaleString()]);
+  if (sm.parks) figures.push(["Parks counted for 300", `${sm.parks.used.toLocaleString()} of ${sm.parks.count.toLocaleString()}`]);
+  if (sm.canopy_cover) {
+    const cc = sm.canopy_cover;
+    figures.push(["Canopy cover", fmt(cc.value, { kind: "percent" }),
+      `Total canopy ÷ total measured area of the ${cc.units.toLocaleString()} ${cc.layer} units T30 covered (nodata pixels excluded) — not an average of unit percentages`]);
+  }
+  for (const m of sm.medians) figures.push([`Median ${m.label[0].toLowerCase()}${m.label.slice(1)}`, fmt(m.value, m)]);
+
+  const share = st => (st && st.true + st.false ? (100 * st.true) / (st.true + st.false) : null);
+  const all = share(sm.rule.meets_3_30_300);
+  const crit = [["3", "meets_3", "trees"], ["30", "meets_30", "canopy"], ["300", "meets_300", "park"]].filter(([, f]) => sm.rule[f]);
+
+  box.innerHTML = `<h2><span>Study area</span><button type="button" class="toggle" id="summary-toggle" aria-expanded="${!collapsed}"
+    title="${collapsed ? "Expand" : "Collapse"} the summary" aria-label="${collapsed ? "Expand" : "Collapse"} the summary">${collapsed ? "+" : "−"}</button></h2>
+    <div class="summary-body"><div class="sub"></div><dl class="figures"></dl>${crit.length ? `<div class="rule"></div>` : ""}</div>`;
+  box.querySelector(".sub").textContent = state.catalog.study_area_name;
+  const dl = box.querySelector(".figures");
+  for (const [k, v, how] of figures) {
+    const dt = el("dt", {}, k);
+    if (how) { dt.title = how; dt.className = "explained"; }
+    dl.append(dt, el("dd", {}, v));
+  }
+  if (sm.canopy_cover) {
+    box.querySelector(".summary-body").insertBefore(
+      el("p", { class: "method" }, `Canopy: total canopy ÷ total area over all ${sm.canopy_cover.units.toLocaleString()} ${sm.canopy_cover.layer} units.`),
+      box.querySelector(".rule"));
+  }
+  if (crit.length) {
+    const r = box.querySelector(".rule");
+    const head = el("div", { class: "rule-head" });
+    head.append(el("span", {}, "Buildings meeting 3-30-300"), el("strong", {}, all === null ? "—" : `${all.toFixed(1)}%`));
+    r.append(head);
+    const bars = el("div", { class: "bars" });
+    for (const [num, f, what] of crit) {
+      const pct = share(sm.rule[f]);
+      const bar = el("div", { class: "bar", title: `${sm.rule[f].true.toLocaleString()} of ${(sm.rule[f].true + sm.rule[f].false).toLocaleString()} evaluated buildings` });
+      const fillEl = el("i");
+      fillEl.style.width = `${pct ?? 0}%`;
+      bar.append(fillEl);
+      bars.append(el("span", {}, `${num} · ${what}`), bar, el("span", { class: "pct" }, pct === null ? "—" : `${pct.toFixed(1)}%`));
+    }
+    r.append(bars);
+  }
+  $("summary-toggle").onclick = () => { savePref("summaryCollapsed", !collapsed); renderSummary(); };
+}
+
+/* ---------- collapsible sidebar ---------- */
+
+function setSidebar(collapsed, save = true) {
+  document.body.classList.toggle("sidebar-collapsed", collapsed);
+  const b = $("sidebar-toggle");
+  const what = collapsed ? "Show the control panel" : "Hide the control panel";
+  b.textContent = collapsed ? "›" : "‹";
+  b.title = what;
+  b.setAttribute("aria-label", what);
+  b.setAttribute("aria-expanded", String(!collapsed));
+  if (save) savePref("sidebarCollapsed", collapsed);
+  // the map container changed size
+  if (map) map.resize();
 }
 
 /* ---------- details ---------- */
@@ -579,19 +807,21 @@ async function showDetails(feature) {
     const codes = Object.keys(data).filter(k => k !== "id" && k !== "name" && !k.startsWith("name:") && !metricNames.has(k) && data[k] !== null);
     body.innerHTML = "<h3></h3><div class='sub'></div><table></table>";
     body.querySelector("h3").textContent = isBuilding ? `Building ${id}` : `${label(layer)} ${data.name || id}`;
-    body.querySelector(".sub").textContent = codes.map(k => `${label(k)} ${data["name:" + k] ?? data[k]}`).join(" · ") || (isBuilding ? "building" : "unit");
+    body.querySelector(".sub").textContent = codes.map(k => `${label(k)} ${data["name:" + k] ?? data[k]}`).join(" · ") || (isBuilding ? "building" : "area");
     const table = body.querySelector("table");
     for (const m of metrics) {
-      const tr = document.createElement("tr");
-      if (m.name === current) tr.className = "current";
-      const [a, b] = [document.createElement("td"), document.createElement("td")];
-      a.textContent = m.label;
-      b.textContent = fmt(data[m.name], m);
-      tr.append(a, b);
+      const tr = el("tr", { class: m.name === current ? "current" : "" });
+      tr.append(el("td", {}, m.label), el("td", {}, fmt(data[m.name], m)));
       table.append(tr);
     }
   }
-  $("details").hidden = false;
+  const details = $("details");
+  details.hidden = false;
+  // keep the popup clear of the summary card above it
+  const summary = $("summary");
+  details.style.maxHeight = !summary.hidden && window.innerWidth > 720
+    ? `${Math.max(160, window.innerHeight - summary.getBoundingClientRect().bottom - 24)}px`
+    : "";
   refreshLayer("selected");
 }
 
@@ -603,96 +833,96 @@ function hideDetails() {
 
 /* ---------- controls ---------- */
 
+function setSectionVisible(id, on) {
+  $(id).classList.toggle("off", !on);
+}
+
 function buildControls() {
   const c = state.catalog;
   $("area-name").textContent = c.study_area_name;
-  const counts = [];
-  if (state.buildings.stats) counts.push(`${state.buildings.stats.n.toLocaleString()} buildings`);
-  if (c.trees) counts.push(`${c.trees.count.toLocaleString()} trees`);
-  $("counts").textContent = counts.join(" · ");
 
-  // basemaps
-  const bm = $("basemaps");
-  for (const [key, b] of Object.entries(BASEMAPS)) {
-    const row = document.createElement("label");
-    row.className = "row";
-    row.innerHTML = `<input type="radio" name="basemap" value="${key}"${key === state.basemap ? " checked" : ""}> <span></span>`;
-    row.querySelector("span").textContent = b.label + (b.note ? ` (${b.note})` : "");
-    row.querySelector("input").onchange = () => { state.basemap = key; saveView(); applyStyle(); };
-    bm.append(row);
-  }
+  // basemap
+  const bm = $("basemap");
+  for (const [key, b] of Object.entries(BASEMAPS)) bm.append(new Option(b.label, key, false, key === state.basemap));
+  bm.onchange = () => { state.basemap = bm.value; saveView(); applyStyle(); };
 
   // buildings
   const bsel = $("building-metric");
   if (c.layers.buildings.metrics.length) {
     fillMetricSelect(bsel, "buildings", state.buildings.metric);
-    bsel.onchange = () => { setMetric("buildings", bsel.value); saveView(); };
+    bsel.onchange = () => setMetric("buildings", bsel.value);
   } else {
     bsel.disabled = true;
     bsel.append(new Option("no building metrics yet", ""));
   }
-  $("show-buildings").onchange = e => { state.buildings.visible = e.target.checked; refreshLayer("buildings"); renderLegend(); };
+  $("show-buildings").checked = state.buildings.visible;
+  $("show-buildings").onchange = e => { state.buildings.visible = e.target.checked; setSectionVisible("sec-buildings", e.target.checked); restyle("buildings"); };
+  setSectionVisible("sec-buildings", state.buildings.visible);
 
-  // units
-  const unitLayers = Object.keys(c.layers).filter(k => k !== "buildings");
-  if (!unitLayers.length) $("units-controls").hidden = true;
+  // areas
+  const unitLayers = unitLayerNames();
+  if (!unitLayers.length) $("sec-units").hidden = true;
   const lsel = $("unit-layer");
   for (const k of unitLayers) lsel.append(new Option(`${c.layers[k].label} · ${c.layers[k].metrics.length} metrics`, k, false, k === state.units.layer));
   lsel.onchange = async () => {
-    state.units.layer = lsel.value;
-    state.units.metric = defaultMetric(lsel.value);
-    fillMetricSelect($("unit-metric"), lsel.value, state.units.metric);
-    if (state.units.metric) state.units.stats = await getJSON(`/api/stats/${encodeURIComponent(lsel.value)}/${encodeURIComponent(state.units.metric)}`);
-    state.units.range = null;
+    const u = state.units;
+    u.layer = lsel.value;
+    u.metric = defaultMetric(lsel.value);
+    u.range = null;
+    fillMetricSelect($("unit-metric"), lsel.value, u.metric);
+    const d = drawn("units");
+    u.stats = await statsFor(u.layer, d.info && d.info.name);
     applyStyle();
-    renderLegend();
+    renderPanel("units");
     saveView();
   };
-  $("show-units").onchange = e => { state.units.visible = e.target.checked; refreshLayer("units"); renderLegend(); saveView(); };
+  $("show-units").checked = state.units.visible;
+  $("show-units").onchange = e => { state.units.visible = e.target.checked; setSectionVisible("sec-units", e.target.checked); restyle("units"); };
+  setSectionVisible("sec-units", state.units.visible);
+  const setStyle = style => {
+    state.units.style = style;
+    for (const o of $("unit-style").querySelectorAll("button")) o.classList.toggle("on", o.dataset.value === style);
+    $("unit-fill").hidden = style !== "fill";
+  };
+  setStyle(state.units.style);
   for (const b of $("unit-style").querySelectorAll("button")) {
     b.onclick = () => {
-      state.units.style = b.dataset.value;
-      for (const o of $("unit-style").querySelectorAll("button")) o.classList.toggle("on", o === b);
-      $("unit-metric").hidden = state.units.style !== "fill";
-      if (state.units.style === "fill" && !state.units.visible) { state.units.visible = true; $("show-units").checked = true; }
-      refreshLayer("units");
-      renderLegend();
-      saveView();
+      setStyle(b.dataset.value);
+      if (state.units.style === "fill" && !state.units.visible) { state.units.visible = true; $("show-units").checked = true; setSectionVisible("sec-units", true); }
+      restyle("units");
     };
   }
   const usel = $("unit-metric");
   if (state.units.layer) fillMetricSelect(usel, state.units.layer, state.units.metric);
-  usel.onchange = () => { setMetric("units", usel.value); saveView(); };
+  usel.onchange = () => setMetric("units", usel.value);
 
   // boundary outlines, any number of unit layers at once
   const ol = $("outlines");
-  for (const k of unitLayerNames()) {
-    const row = document.createElement("label");
-    row.className = "row";
-    row.innerHTML = `<input type="checkbox"${state.outlines.has(k) ? " checked" : ""}> <span></span>`;
-    row.querySelector("span").textContent = c.layers[k].label;
-    row.querySelector("input").onchange = e => {
-      e.target.checked ? state.outlines.add(k) : state.outlines.delete(k);
-      applyStyle();
-      saveView();
-    };
+  for (const k of unitLayers) {
+    const row = el("label", { class: "row" });
+    const box = el("input", { type: "checkbox" });
+    box.checked = state.outlines.has(k);
+    box.onchange = e => { e.target.checked ? state.outlines.add(k) : state.outlines.delete(k); applyStyle(); saveView(); };
+    row.append(box, el("span", {}, c.layers[k].label));
     ol.append(row);
   }
-  if (!unitLayerNames().length) $("outlines-controls").hidden = true;
+  if (!unitLayers.length) $("outlines-controls").hidden = true;
 
   // parks
   const pbox = $("show-parks");
+  pbox.checked = state.parks.visible;
   if (!c.parks) {
     pbox.disabled = true;
     $("parks-row").classList.add("disabled");
     $("parks-note").textContent = "not available";
   } else {
-    $("parks-note").textContent = `· ${c.parks.used.toLocaleString()} used`;
-    pbox.onchange = e => { state.parks.visible = e.target.checked; refreshLayer("parks"); renderLegend(); saveView(); };
+    $("parks-note").textContent = `· ${c.parks.used.toLocaleString()} counted`;
+    pbox.onchange = e => { state.parks.visible = e.target.checked; refreshLayer("parks"); renderParksLegend(); saveView(); };
   }
 
   // trees
   const tbox = $("show-trees");
+  tbox.checked = state.trees.visible;
   if (!c.trees) {
     tbox.disabled = true;
     $("trees-row").classList.add("disabled");
@@ -702,6 +932,7 @@ function buildControls() {
     $("trees-note").textContent = c.trees.sized ? "· to scale" : "· as dots";
     tbox.onchange = e => { state.trees.visible = e.target.checked; refreshLayer("trees"); saveView(); };
   }
+  $("sidebar-toggle").onclick = () => setSidebar(!document.body.classList.contains("sidebar-collapsed"));
   $("details-close").onclick = hideDetails;
   document.addEventListener("keydown", e => { if (e.key === "Escape") hideDetails(); });
 }
@@ -709,31 +940,40 @@ function buildControls() {
 /* ---------- persistence (per browser; best effort) ---------- */
 
 const VIEW_KEY = "greenpy-viz-view";
+const STYLE_KEYS = ["method", "k", "palette", "diverging", "reverse", "view"];
+
+function readStore() {
+  try { return JSON.parse(localStorage.getItem(VIEW_KEY) || "null") || {}; } catch (_) { return {}; }
+}
+function writeStore(obj) {
+  try { localStorage.setItem(VIEW_KEY, JSON.stringify(obj)); } catch (_) { /* storage unavailable */ }
+}
+function loadPref(key) { return readStore()[key]; }
+function savePref(key, value) { writeStore({ ...readStore(), [key]: value }); }
+
 function saveView() {
-  try {
-    localStorage.setItem(VIEW_KEY, JSON.stringify({
-      area: state.catalog.study_area_name,
-      basemap: state.basemap,
-      buildingMetric: state.buildings.metric,
-      unitLayer: state.units.layer,
-      unitMetric: state.units.metric,
-      unitStyle: state.units.style,
-      units: state.units.visible,
-      trees: state.trees.visible,
-      parks: state.parks.visible,
-      outlines: [...state.outlines],
-      view: state.buildings.view,
-    }));
-  } catch (_) { /* storage unavailable */ }
+  const pick = s => Object.fromEntries(STYLE_KEYS.map(k => [k, s[k]]));
+  writeStore({
+    ...readStore(),
+    area: state.catalog.study_area_name,
+    basemap: state.basemap,
+    buildingMetric: state.buildings.metric,
+    buildingStyle: pick(state.buildings),
+    buildings: state.buildings.visible,
+    unitLayer: state.units.layer,
+    unitMetric: state.units.metric,
+    unitStyle: state.units.style,
+    unitColours: pick(state.units),
+    units: state.units.visible,
+    trees: state.trees.visible,
+    parks: state.parks.visible,
+    outlines: [...state.outlines],
+  });
 }
 
 function loadView() {
-  try {
-    const v = JSON.parse(localStorage.getItem(VIEW_KEY) || "null");
-    return v && v.area === state.catalog.study_area_name ? v : null;
-  } catch (_) {
-    return null;
-  }
+  const v = readStore();
+  return v.area === state.catalog.study_area_name ? v : {};
 }
 
 /* ---------- boot ---------- */
@@ -744,32 +984,39 @@ async function main() {
   document.title = `${catalog.study_area_name} · greenpy`;
 
   const has = (layer, m) => layer && catalog.layers[layer] && catalog.layers[layer].metrics.some(x => x.name === m);
-  const saved = loadView() || {};
+  const saved = loadView();
   const unitLayers = unitLayerNames();
+  const restoreStyle = (s, st) => {
+    if (!st) return;
+    if (METHODS[st.method]) s.method = st.method;
+    if (st.k >= 3 && st.k <= 9) s.k = st.k;
+    if (SEQUENTIAL[st.palette]) s.palette = st.palette;
+    if (DIVERGING[st.diverging]) s.diverging = st.diverging;
+    s.reverse = !!st.reverse;
+    s.view = st.view === "flag" ? "flag" : "gradient";
+  };
   state.basemap = BASEMAPS[saved.basemap] ? saved.basemap : "paper";
-  state.buildings.view = saved.view === "flag" ? "flag" : "gradient";
   state.parks.visible = !!saved.parks && !!catalog.parks;
   state.outlines = new Set((saved.outlines || []).filter(k => unitLayers.includes(k)));
-  $("show-parks").checked = state.parks.visible;
+  state.buildings.visible = saved.buildings !== false;
   state.buildings.metric = has("buildings", saved.buildingMetric) ? saved.buildingMetric : defaultMetric("buildings");
+  restoreStyle(state.buildings, saved.buildingStyle);
   state.units.layer = unitLayers.includes(saved.unitLayer) ? saved.unitLayer : unitLayers[unitLayers.length - 1] || null;
   state.units.metric = has(state.units.layer, saved.unitMetric) ? saved.unitMetric : state.units.layer ? defaultMetric(state.units.layer) : null;
   state.units.style = saved.unitStyle === "fill" ? "fill" : "outline";
   state.units.visible = !!saved.units;
+  restoreStyle(state.units, saved.unitColours);
   state.trees.visible = !!saved.trees && !!catalog.trees;
-  $("show-units").checked = state.units.visible;
-  $("show-trees").checked = state.trees.visible;
-  for (const o of $("unit-style").querySelectorAll("button")) o.classList.toggle("on", o.dataset.value === state.units.style);
-  $("unit-metric").hidden = state.units.style !== "fill";
 
   const b = drawn("buildings"), u = drawn("units");
-  if (b.flag) state.buildings.mode = "rule";
+  if (b.flag && !saved.buildingStyle) state.buildings.method = "rule";
   [state.buildings.stats, state.buildings.flagStats, state.units.stats] = await Promise.all([
     b.info ? statsFor("buildings", b.info.name) : null,
     b.flag ? statsFor("buildings", b.flag.name) : null,
     u.info ? statsFor(state.units.layer, u.info.name) : null,
   ]);
 
+  setSidebar(loadPref("sidebarCollapsed") === true, false);
   map = new maplibregl.Map({
     container: "map",
     style: { version: 8, sources: {}, layers: [] },
@@ -785,9 +1032,16 @@ async function main() {
   map.addControl(new maplibregl.ScaleControl({ unit: "metric" }), "bottom-right");
   buildControls();
   applyStyle();
-  renderLegend();
+  renderPanel("buildings");
+  renderPanel("units");
+  renderParksLegend();
+  renderSummary();
 
-  map.on("zoomend", renderLegend);
+  let lastZoomOk = map.getZoom() >= catalog.min_zoom.buildings;
+  map.on("zoomend", () => {
+    const ok = map.getZoom() >= catalog.min_zoom.buildings;
+    if (ok !== lastZoomOk) { lastZoomOk = ok; renderPanel("buildings"); }
+  });
   map.on("click", ev => {
     const order = ["gp-trees", "gp-buildings", "gp-parks", "gp-units-fill"];
     const layers = order.filter(id => map.getLayer(id) && map.getLayoutProperty(id, "visibility") !== "none");
@@ -803,7 +1057,7 @@ async function main() {
 }
 
 main().catch(err => {
-  document.body.insertAdjacentHTML("beforeend", `<section class="panel" style="top:40%;left:50%;transform:translateX(-50%)"><h1>Could not start the map</h1><p></p></section>`);
+  document.body.insertAdjacentHTML("beforeend", `<section class="card" style="top:40%;left:50%;transform:translateX(-50%)"><h1>Could not start the map</h1><p></p></section>`);
   document.querySelector("body > section:last-child p").textContent = String(err);
   console.error(err);
 });

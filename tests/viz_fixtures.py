@@ -70,7 +70,8 @@ def make_outputs(base: Path, merged: bool = False) -> None:
         "building_id": [0, 1, 2], "closest_park_access_id": [7, 7, 8], "distance_manhattan": [120.0, 410.0, None],
         "closest_park_site_id": [1, 1, 2], "distance_euclidean": [100.0, 350.0, 80.0], "TRACT": ["T0", "T0", "T1"],
     }).to_csv(base / "T300" / "T300_D0.csv", index=False)
-    pd.DataFrame({"TRACT": ["T0", "T1"], "canopy_cover": [12.5, 41.0], "total_pixels": [1e4, 1e4]}).to_csv(
+    # T0 has three times T1's valid pixels (part of T1's CHM is nodata)
+    pd.DataFrame({"TRACT": ["T0", "T1"], "canopy_cover": [12.5, 41.0], "total_pixels": [3e4, 1e4]}).to_csv(
         base / "T30" / "T30_D0.csv", index=False
     )
     # tree-less units are absent from Tree_count's CSVs

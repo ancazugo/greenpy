@@ -8,41 +8,56 @@
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<aside id="sidebar">
+  <header id="masthead">
+    <h1><span class="wordmark">greenpy</span> <span id="area-name"></span></h1>
+  </header>
+
+  <section class="sec" id="sec-map">
+    <h2 class="sec-title">Map</h2>
+    <label class="label" for="basemap">Basemap</label>
+    <select id="basemap"></select>
+    <h3 class="label">Overlays</h3>
+    <label class="row" id="parks-row"><input type="checkbox" id="show-parks"> Parks <span class="muted" id="parks-note"></span></label>
+    <label class="row" id="trees-row"><input type="checkbox" id="show-trees"> Trees <span class="muted" id="trees-note"></span></label>
+    <div id="parks-legend"></div>
+    <div id="outlines-controls">
+      <h3 class="label">Boundary lines</h3>
+      <div id="outlines"></div>
+    </div>
+  </section>
+
+  <section class="sec" id="sec-buildings">
+    <h2 class="sec-title">Buildings <label class="show"><input type="checkbox" id="show-buildings" checked> show</label></h2>
+    <p class="hint">One value per building footprint.</p>
+    <label class="label" for="building-metric">Metric</label>
+    <select id="building-metric"></select>
+    <div id="buildings-panel"></div>
+  </section>
+
+  <section class="sec" id="sec-units">
+    <h2 class="sec-title">Areas <label class="show"><input type="checkbox" id="show-units"> show</label></h2>
+    <p class="hint">Census units or grid cells: values measured per area, or averaged over the buildings inside.</p>
+    <label class="label" for="unit-layer">Level</label>
+    <select id="unit-layer"></select>
+    <div class="seg" id="unit-style" role="group" aria-label="How areas are drawn">
+      <button type="button" data-value="outline" class="on">Outline only</button><button type="button" data-value="fill">Fill by metric</button>
+    </div>
+    <div id="unit-fill" hidden>
+      <label class="label" for="unit-metric">Metric</label>
+      <select id="unit-metric"></select>
+      <div id="units-panel"></div>
+    </div>
+  </section>
+</aside>
+
+<button type="button" class="toggle" id="sidebar-toggle" aria-controls="sidebar"></button>
+
 <div id="map"></div>
 
-<section class="panel" id="masthead">
-  <h1><span class="wordmark">greenpy</span> <span id="area-name"></span></h1>
-  <p class="counts" id="counts"></p>
-  <label class="label" for="building-metric">Buildings coloured by</label>
-  <select id="building-metric"></select>
-</section>
+<section class="card" id="summary" hidden></section>
 
-<section class="panel" id="layers">
-  <h2 class="label">Basemap</h2>
-  <div id="basemaps"></div>
-  <h2 class="label">Layers</h2>
-  <label class="row"><input type="checkbox" id="show-buildings" checked> Buildings</label>
-  <div id="units-controls">
-    <label class="row"><input type="checkbox" id="show-units"> Units</label>
-    <div class="indent">
-      <select id="unit-layer" aria-label="Unit level"></select>
-      <div class="seg" id="unit-style" role="group" aria-label="Unit style">
-        <button type="button" data-value="outline" class="on">Outline</button><button type="button" data-value="fill">Fill</button>
-      </div>
-      <select id="unit-metric" aria-label="Unit metric" hidden></select>
-    </div>
-  </div>
-  <label class="row" id="parks-row"><input type="checkbox" id="show-parks"> Parks <span class="muted" id="parks-note"></span></label>
-  <label class="row" id="trees-row"><input type="checkbox" id="show-trees"> Trees <span class="muted" id="trees-note"></span></label>
-  <div id="outlines-controls">
-    <h2 class="label">Boundaries</h2>
-    <div id="outlines"></div>
-  </div>
-</section>
-
-<section class="panel" id="legend"></section>
-
-<section class="panel" id="details" hidden>
+<section class="card" id="details" hidden>
   <button type="button" class="close" id="details-close" aria-label="Close">×</button>
   <div id="details-body"></div>
 </section>

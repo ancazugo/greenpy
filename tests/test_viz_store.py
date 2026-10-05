@@ -200,3 +200,22 @@ def test_merge_gaps_fall_back_to_module_outputs(tmp_path):
         assert tract["canopy_cover"] == "Merge" and list(tract).count("canopy_cover") == 1
     finally:
         ts.close()
+
+
+def test_study_summary(store):
+    _, _, ts = store
+    s = ts.meta["summary"]
+    assert s["buildings"] == 3 and s["trees"] == 3
+    assert (s["rule"]["meets_3"]["true"], s["rule"]["meets_3_30_300"]["true"]) == (2, 1)
+    # total canopy / total valid pixels: (12.5 % of 30,000 + 41 % of 10,000) / 40,000,
+    # not the 26.75 % a plain average of the two tracts would give
+    cc = s["canopy_cover"]
+    assert cc["value"] == pytest.approx(19.625) and (cc["layer"], cc["units"]) == ("TRACT", 2)
+    assert any(m["kind"] == "distance" for m in s["medians"])
+
+
+def test_stats_carry_percentiles(store):
+    _, _, ts = store
+    s = json.loads(ts.stats("buildings", "distance_euclidean"))
+    assert len(s["pcts"]) == 101 and s["pcts"][0] == 80.0 and s["pcts"][-1] == 350.0
+    assert s["pcts"] == sorted(s["pcts"])

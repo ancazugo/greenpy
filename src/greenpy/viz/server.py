@@ -39,6 +39,7 @@ def _catalog_payload(store: TileStore) -> dict:
         },
         "trees": meta.get("trees"),
         "parks": meta.get("parks"),
+        "summary": meta.get("summary"),
         "min_zoom": MIN_ZOOM,
     }
 
