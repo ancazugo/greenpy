@@ -115,7 +115,7 @@ def test_raster_matches_exact_prisms_away_from_thresholds(seed):
     blds = [b for i, b in enumerate(blds) if not any(b.intersects(o) for o in blds[:i])]
     bh = rng.uniform(3, 25, len(blds))
     crowns = [Point(x, y).buffer(rng.uniform(1.5, 4)) for x, y in rng.uniform(0, 110, (25, 2))]
-    crowns = [c for c in crowns if not any(c.intersects(b) for b in blds)]
+    crowns = [c for c in crowns if not any(c.intersects(b) for b in blds)]  # crowns may overlap each other
     th = rng.uniform(4, 20, len(crowns))
     params = VisibilityParams(buffer=40, tree_area=0, tree_height=0, resolution=0.25, crown_points=2)
 
@@ -132,7 +132,9 @@ def test_raster_matches_exact_prisms_away_from_thresholds(seed):
     eye_levels = [1.5 + 3 * k for k in range(9)]
     checked = 0
     for p, (b, t) in enumerate(zip(pb, pt)):
-        obstacles = [(g, h) for g, h in zip(blds, bh)] + [(c, h) for i, (c, h) in enumerate(zip(crowns, th)) if i != t]
+        # inside the target's crown only buildings block
+        obstacles = [(g, h) for g, h in zip(blds, bh)] + [
+            (c.difference(crowns[t]), h) for i, (c, h) in enumerate(zip(crowns, th)) if i != t]
         z_exact = math.inf
         for ko in range(fp.start[b], fp.start[b] + fp.count[b]):
             for kt in range(tg.start[t], tg.start[t] + tg.count[t]):

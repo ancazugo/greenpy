@@ -156,7 +156,10 @@ def _fetch_chunk(collection_id: str, bounds: tuple, properties: list[str], path:
             parts.append(gpd.read_parquet(qp))
             qp.unlink()
         gdf = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), crs=4326)
-    if gdf.crs is None:
+    if gdf.empty or "geometry" not in gdf.columns:
+        # GEE returns a frame without a geometry column for chunks with no features
+        gdf = gpd.GeoDataFrame({k: [] for k in properties}, geometry=[], crs=4326)
+    elif gdf.crs is None:
         gdf = gdf.set_crs(4326)
     gdf = gdf[[c for c in properties if c in gdf.columns] + ["geometry"]]
     tmp = path.with_suffix(".parquet.part")

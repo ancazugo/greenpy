@@ -1,250 +1,98 @@
 """
-Visibility module: 2.5D line-of-sight from buildings to trees.
+Vector engine: exact line of sight against footprint and crown prisms, in Sedona SQL.
 
-For each building–tree pair within `buffer` metres, 9 sightlines are evaluated
-from 3 observer levels on the building (bottom z=0, middle z=H/2, top z=H) to
-3 target levels on the tree (z=0, h/2, h). A sightline is blocked when another
-building footprint or tree canopy polygon crosses it and that obstacle's
-height reaches the sightline's interpolated height at the crossing.
-
-Model assumptions: buildings are flat-topped prisms, trees are solid
-ground-to-crown prisms (sightlines under a canopy count as blocked), terrain
-is flat (shared ground level z=0), and grazing contact counts as blocked.
-Buildings or trees with missing height are skipped entirely — as observers,
-targets and obstacles — so complete height data is expected.
+The reference for the raster engine on small areas. Observers, targets and
+candidate pairs are the shared definitions (observers / targets / pairs):
+every front-facing facade point of a building is joined to every target
+point of each candidate tree. Each sightline is intersected with every
+obstacle — all buildings, including the observer's own, and every tree crown
+except the target's — modelled as flat-topped prisms from the ground. For a
+crossing over fractions [f_lo, f_hi] of the sightline (crowns clipped by the
+target's crown, inside which only buildings block), an obstacle of height
+h needs an eye height above max over {f_lo, f_hi} of (h - f*zt) / (1 - f);
+the sightline needs the maximum over its crossings, the pair the minimum
+over its sightlines. Ground is flat; skip metres at both ends are ignored.
 """
 
 import time
 from pathlib import Path
 
-import geopandas as gpd
+import numpy as np
 import pandas as pd
+import shapely
 from loguru import logger
-from pyspark.sql.dataframe import DataFrame
-from pyspark.sql.functions import monotonically_increasing_id
 from pyspark.sql.session import SparkSession
 
 from ...config.schema import GreenPyConfig
-from ...utils.data_processing import (
-    drop_geo_views,
-    get_geometries,
-    load_trees_gdf,
-    view_suffix,
-)
+from ...utils.data_processing import view_suffix
+from .inputs import VisibilityInputs
+from .observers import facade_points, floor_eyes
+from .pairs import building_counts, eligible_pairs
+from .params import VisibilityParams
+from .raster_engine import CROWN_MARGIN, OUTPUT_COLUMNS, load_trees, target_mask
+from .targets import crown_polygons, tree_targets
 
-# Observer/target levels as SQL expressions of a height column
-_LEVELS = {"bottom": "0.0D", "middle": "{h} / 2.0D", "top": "{h}"}
-
-# Sightline endpoints can graze a neighbouring polygon (facade point on the
-# observer's own wall touching an adjacent footprint, target centroid touched
-# by an overlapping canopy). Crossings shorter than this are ignored (metres).
-_ENDPOINT_EPSILON = 0.05
+# Inputs are loaded once per (config, overlay) and reused across geo codes
+_INPUTS: dict = {}
+_NO_OBSTACLE = -1e30
 
 
-def _register_vis_buildings(sedona: SparkSession, geo_level: str, geo_code: str, buffer: int) -> None:
-    """Register vis_buildings_<sfx> (obstacles, buffered extent) and vis_observers_<sfx>.
-
-    Obstacle buildings are clipped to the boundary buffered by `buffer` metres so
-    buildings just outside the study area still occlude; observers are the
-    subset owned by geo_code in the buildings overlay (one geo code per
-    building, as in the other modules). Buildings with missing or non-positive
-    height are dropped from both, with a warning.
-    """
-    sfx = view_suffix(geo_code)
-
-    counts = sedona.sql(
-        f"""
-        SELECT COUNT(*) AS n_all,
-               SUM(CASE WHEN b.building_height IS NULL OR b.building_height <= 0 THEN 1 ELSE 0 END) AS n_bad
-        FROM buildings b, geo_boundary_{sfx} g
-        WHERE ST_Intersects(b.geometry, ST_Buffer(g.geometry, {buffer}))
-        """
-    ).collect()[0]
-    if counts["n_bad"]:
-        logger.warning(
-            f"Visibility: skipping {counts['n_bad']}/{counts['n_all']} buildings with missing or "
-            f"invalid height in {geo_code} — complete building height data is expected"
-        )
-
-    sedona.sql(
-        f"""
-        SELECT b.building_id, b.geometry, CAST(b.building_height AS DOUBLE) AS building_height
-        FROM buildings b, geo_boundary_{sfx} g
-        WHERE ST_Intersects(b.geometry, ST_Buffer(g.geometry, {buffer}))
-          AND b.building_height IS NOT NULL AND b.building_height > 0
-        """
-    ).createOrReplaceTempView(f"vis_buildings_{sfx}")
-
-    sedona.sql(
-        f"""
-        SELECT b.* FROM vis_buildings_{sfx} b
-        JOIN boundaries_buildings_overlay o ON b.building_id = o.building_id
-        WHERE o.{geo_level} = '{geo_code}'
-        """
-    ).createOrReplaceTempView(f"vis_observers_{sfx}")
+def _inputs(cfg: GreenPyConfig, overlay_path: Path | None) -> VisibilityInputs:
+    key = (cfg.output.base_dir, str(overlay_path))
+    if key not in _INPUTS:
+        _INPUTS[key] = VisibilityInputs.load(cfg, overlay_path)
+    return _INPUTS[key]
 
 
-def _register_vis_trees(
-    sedona: SparkSession,
-    trees_dir: Path,
-    geo_boundary_gdf: gpd.GeoDataFrame,
-    cfg: GreenPyConfig,
-    geo_code: str,
-    tree_area: int,
-    tree_height: int,
-) -> DataFrame:
-    """Load trees and register vis_trees_<sfx> keeping canopy polygons.
-
-    Unlike t3.read_trees_unique, geometries stay as polygons (needed for
-    obstruction) with the centroid added as tree_pt (the sightline target).
-    Trees without a height are dropped with a warning; the tree_area /
-    tree_height thresholds then apply (sub-threshold trees are not considered
-    as obstacles either).
-    """
-    geo_trees_gdf = load_trees_gdf(trees_dir, geo_boundary_gdf, cfg)
-
-    n_all = len(geo_trees_gdf)
-    n_bad = int(geo_trees_gdf["tree_height"].isna().sum()) if "tree_height" in geo_trees_gdf.columns else 0
-    if n_bad:
-        logger.warning(
-            f"Visibility: skipping {n_bad}/{n_all} trees with missing height in {geo_code} — "
-            f"complete tree height data is expected"
-        )
-
-    geo_trees_sdf = sedona.createDataFrame(geo_trees_gdf)
-    if "geom" in geo_trees_sdf.columns:
-        geo_trees_sdf = geo_trees_sdf.withColumnRenamed("geom", "geometry")
-    geo_trees_sdf = (
-        geo_trees_sdf
-        .where(f"tree_height IS NOT NULL AND tree_area > {tree_area} AND tree_height > {tree_height} AND geometry IS NOT NULL")
-        .selectExpr("geometry", "ST_Centroid(geometry) AS tree_pt", "CAST(tree_height AS DOUBLE) AS tree_height")
-        .withColumn("tree_id", monotonically_increasing_id())
-    )
-    geo_trees_sdf.createOrReplaceTempView(f"vis_trees_{view_suffix(geo_code)}")
-    return geo_trees_sdf
+def sightlines(fp, targets, pair_b, pair_t) -> pd.DataFrame:
+    """One row per (pair, front-facing facade point, target point): pair, target tree, endpoints."""
+    rows = []
+    for p, (b, t) in enumerate(zip(pair_b, pair_t)):
+        ko = np.arange(fp.start[b], fp.start[b] + fp.count[b])
+        kt = np.arange(targets.start[t], targets.start[t] + targets.count[t])
+        o, g = np.repeat(ko, len(kt)), np.tile(kt, len(ko))
+        front = fp.nx[o] * (targets.x[g] - fp.x[o]) + fp.ny[o] * (targets.y[g] - fp.y[o]) > 0
+        o, g = o[front], g[front]
+        rows.append(pd.DataFrame({
+            "pair_id": p, "t_id": t, "ox": fp.x[o], "oy": fp.y[o],
+            "tx": targets.x[g], "ty": targets.y[g], "tz": targets.z[g],
+        }))
+    df = pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(
+        columns=["pair_id", "t_id", "ox", "oy", "tx", "ty", "tz"])
+    df.insert(0, "ray_id", np.arange(len(df)))
+    df["len"] = np.hypot(df["tx"] - df["ox"], df["ty"] - df["oy"])
+    return df
 
 
-def _blocked_flags_sql(sfx: str) -> str:
-    """SQL computing, per building–tree pair, one blocked flag per of the 9 sightlines.
-
-    A single 2D sightline per pair is intersected with every obstacle; since the
-    sightline is straight, the fraction of any intersection point along it is
-    dist(obs_pt, .) / sight_len, and the sightline z is linear in that fraction,
-    so the minimum z over a crossing is attained at f_lo or f_hi. An obstacle
-    blocks the (z_obs, z_tgt) sightline iff its height reaches that minimum.
-    """
-    obs_levels = {k: v.format(h="bh") for k, v in _LEVELS.items()}
-    tgt_levels = {k: v.format(h="th") for k, v in _LEVELS.items()}
-    flags = ",\n            ".join(
-        f"MAX(CASE WHEN obs_h >= LEAST({zo} + f_lo * ({zt} - ({zo})), {zo} + f_hi * ({zt} - ({zo}))) "
-        f"THEN 1 ELSE 0 END) AS blk_{ko}_{kt}"
-        for ko, zo in obs_levels.items()
-        for kt, zt in tgt_levels.items()
-    )
+def pair_zreq_sql(sfx: str, skip: float) -> str:
+    """Lowest visible eye height per pair (NULL: no front-facing sightline, -1e30: unobstructed)."""
     return f"""
-        SELECT building_id, tree_id,
-            {flags}
-        FROM (
-            SELECT building_id, tree_id, bh, th, obs_h,
-                   GREATEST(ST_Distance(obs_pt, inter) / sight_len, {_ENDPOINT_EPSILON} / sight_len) AS f_lo,
-                   LEAST(1.0D - ST_Distance(tgt_pt, inter) / sight_len, 1.0D - {_ENDPOINT_EPSILON} / sight_len) AS f_hi
-            FROM (
-                SELECT s.building_id, s.tree_id, s.bh, s.th, s.obs_pt, s.tgt_pt, s.sight_len,
-                       o.obs_h, ST_Intersection(s.sightline, o.geometry) AS inter
-                FROM vis_pairs_{sfx} s
-                JOIN vis_obstacles_{sfx} o ON ST_Intersects(s.sightline, o.geometry)
-                WHERE s.sight_len > 0
-                  AND o.obs_id <> CONCAT('b_', CAST(s.building_id AS STRING))
-                  AND o.obs_id <> CONCAT('t_', CAST(s.tree_id AS STRING))
-            )
-        )
-        WHERE f_lo <= f_hi
-        GROUP BY building_id, tree_id
-    """
-
-
-def compute_visibility(sedona: SparkSession, geo_code: str, buffer: int, observer_mode: str) -> pd.DataFrame:
-    """Run the pair/obstruction/aggregation queries and return per-building counts."""
-    sfx = view_suffix(geo_code)
-
-    obs_expr = (
-        "ST_Centroid(b.geometry)"
-        if observer_mode == "centroid"
-        else "ST_ClosestPoint(ST_Boundary(b.geometry), t.tree_pt)"
+    WITH hits AS (
+        SELECT r.ray_id, r.ox, r.oy, r.tx, r.ty, r.tz, r.len, o.h,
+               CASE WHEN o.kind = 't' THEN ST_Difference(ST_Intersection(r.geometry, o.geometry), c.geometry)
+                    ELSE ST_Intersection(r.geometry, o.geometry) END AS inter
+        FROM vis_rays_{sfx} r
+        JOIN vis_obstacles_{sfx} o ON ST_Intersects(r.geometry, o.geometry)
+        JOIN vis_crowns_{sfx} c ON c.t_id = r.t_id
+        WHERE r.len > {2 * skip}
+          AND NOT (o.kind = 't' AND o.idx = r.t_id)
+    ),
+    crossings AS (
+        SELECT ray_id, tz, h,
+               GREATEST(ST_Distance(ST_Point(ox, oy), inter) / len, {skip} / len) AS f_lo,
+               LEAST(1.0D - ST_Distance(ST_Point(tx, ty), inter) / len, 1.0D - {skip} / len) AS f_hi
+        FROM hits
+        WHERE NOT ST_IsEmpty(inter)
+    ),
+    ray_z AS (
+        SELECT ray_id, MAX(GREATEST((h - f_lo * tz) / (1.0D - f_lo), (h - f_hi * tz) / (1.0D - f_hi))) AS zreq
+        FROM crossings WHERE f_lo <= f_hi
+        GROUP BY ray_id
     )
-    sedona.sql(
-        f"""
-        SELECT building_id, tree_id, bh, th, obs_pt, tgt_pt,
-               ST_MakeLine(obs_pt, tgt_pt) AS sightline,
-               ST_Distance(obs_pt, tgt_pt) AS sight_len
-        FROM (
-            SELECT b.building_id, b.building_height AS bh, t.tree_id, t.tree_height AS th,
-                   {obs_expr} AS obs_pt, t.tree_pt AS tgt_pt
-            FROM vis_observers_{sfx} b
-            JOIN vis_trees_{sfx} t ON ST_DWithin(b.geometry, t.tree_pt, {buffer})
-        )
-        """
-    ).createOrReplaceTempView(f"vis_pairs_{sfx}")
-
-    sedona.sql(
-        f"""
-        SELECT CONCAT('b_', CAST(building_id AS STRING)) AS obs_id, geometry, building_height AS obs_h
-        FROM vis_buildings_{sfx}
-        UNION ALL
-        SELECT CONCAT('t_', CAST(tree_id AS STRING)) AS obs_id, geometry, tree_height AS obs_h
-        FROM vis_trees_{sfx}
-        """
-    ).createOrReplaceTempView(f"vis_obstacles_{sfx}")
-
-    sedona.sql(_blocked_flags_sql(sfx)).createOrReplaceTempView(f"vis_blocked_{sfx}")
-
-    # A tree is visible from a building level iff at least one of its 3 target
-    # levels has a clear sightline. Pairs with no intersecting obstacle have no
-    # row in vis_blocked (inner join) -> COALESCE to unblocked.
-    vis_level = {
-        ko: " AND ".join(f"COALESCE(k.blk_{ko}_{kt}, 0) = 1" for kt in _LEVELS)
-        for ko in _LEVELS
-    }
-    visible_df = sedona.sql(
-        f"""
-        SELECT o.building_id,
-               COALESCE(SUM(CASE WHEN v.vis_bottom THEN 1 ELSE 0 END), 0) AS visible_trees_bottom,
-               COALESCE(SUM(CASE WHEN v.vis_middle THEN 1 ELSE 0 END), 0) AS visible_trees_middle,
-               COALESCE(SUM(CASE WHEN v.vis_top THEN 1 ELSE 0 END), 0) AS visible_trees_top,
-               COALESCE(SUM(CASE WHEN v.vis_bottom OR v.vis_middle OR v.vis_top THEN 1 ELSE 0 END), 0) AS visible_trees
-        FROM vis_observers_{sfx} o
-        LEFT JOIN (
-            SELECT p.building_id, p.tree_id,
-                   NOT ({vis_level["bottom"]}) AS vis_bottom,
-                   NOT ({vis_level["middle"]}) AS vis_middle,
-                   NOT ({vis_level["top"]}) AS vis_top
-            FROM vis_pairs_{sfx} p
-            LEFT JOIN vis_blocked_{sfx} k
-              ON p.building_id = k.building_id AND p.tree_id = k.tree_id
-        ) v ON o.building_id = v.building_id
-        GROUP BY o.building_id
-        """
-    ).toPandas()
-
-    sedona.catalog.dropTempView(f"vis_blocked_{sfx}")
-    return visible_df
-
-
-def _attach_sub_geo_level(
-    sedona, visible_df: pd.DataFrame, geo_level: str, geo_code: str, sub_geo_level: str
-) -> pd.DataFrame:
-    """Join the sub_geo_level code of each observer building from the overlay lookup."""
-    building_level_df = sedona.sql(
-        f"""
-        SELECT building_id, {sub_geo_level}
-        FROM boundaries_buildings_overlay
-        WHERE {geo_level} = '{geo_code}'
-        """
-    ).toPandas()
-    # ids may be numeric in file-backed sources while views return strings
-    building_level_df["building_id"] = building_level_df["building_id"].astype(str)
-    visible_df = visible_df.assign(building_id=visible_df["building_id"].astype(str))
-    return visible_df.merge(building_level_df, on="building_id", how="left")
+    SELECT r.pair_id, MIN(COALESCE(z.zreq, CAST({_NO_OBSTACLE} AS DOUBLE))) AS zreq
+    FROM vis_rays_{sfx} r LEFT JOIN ray_z z ON r.ray_id = z.ray_id
+    GROUP BY r.pair_id
+    """
 
 
 def process_geo_code(
@@ -257,55 +105,78 @@ def process_geo_code(
     buffer: int = 100,
     tree_area: int = 10,
     tree_height: int = 3,
-    observer_mode: str = "facade",
     overwrite: bool = True,
+    overlay_path: Path | None = None,
 ) -> pd.DataFrame | None:
-    """Compute tree visibility from buildings for one geo_code.
-
-    Writes `Visibility_<geo_code>_<buffer>m.csv` to output_dir with columns
-    building_id, visible_trees_bottom, visible_trees_middle, visible_trees_top,
-    visible_trees, <sub_geo_level>. Returns the DataFrame, the cached CSV when
-    it exists and overwrite is False, or None on error.
-    """
-    start_time = time.time()
-    logger.info(f"Visibility: processing {geo_code} with buffer {buffer}m ({observer_mode} observer)")
-
-    out_path = output_dir / f"Visibility_{geo_code}_{buffer}m.csv"
-
+    """Visible trees per building of one geo_code with exact geometry -> Visibility_<geo_code>_<buffer>m.csv."""
+    start = time.time()
+    out_path = Path(output_dir) / f"Visibility_{geo_code}_{buffer}m.csv"
     if out_path.exists() and not overwrite:
         return pd.read_csv(out_path)
-
-    if "building_height" not in sedona.table("buildings").columns:
-        logger.error(
-            "Visibility requires building heights: set columns.building_height_col in the config, "
-            "then delete <output.base_dir>/database/buildings.parquet so the cache is rebuilt"
-        )
-        return None
-
+    sfx = view_suffix(geo_code)
+    params = VisibilityParams.from_cfg(cfg, buffer, tree_area, tree_height)
     try:
-        # trees within `buffer` of edge buildings may sit in neighbouring tiles
-        search_gdf = gpd.GeoDataFrame(
-            get_geometries(sedona, geo_level, geo_code, dissolve=True).toPandas(),
-            geometry="geometry", crs=cfg.crs,
+        inputs = _inputs(cfg, overlay_path)
+        idx = inputs.owned(geo_level, geo_code)
+        if len(idx) == 0:
+            logger.warning(f"Visibility (vector): no buildings in {geo_code}")
+            return None
+        geoms = inputs.geoms[idx]
+        minx, miny, maxx, maxy = shapely.total_bounds(geoms)
+        pad = params.buffer + CROWN_MARGIN
+        bounds = (minx - pad, miny - pad, maxx + pad, maxy + pad)
+        near = inputs.tree.query(shapely.box(*bounds))
+        trees = load_trees(cfg, bounds, params)
+        targets = tree_targets(trees[target_mask(trees, params)], params.crown_points, params.crown_point_height)
+        target_rows = np.flatnonzero(target_mask(trees, params))
+
+        fp = facade_points(geoms, params.facade_spacing, params.facade_offset,
+                           blockers=shapely.STRtree(inputs.geoms[near]))
+        pair_b, pair_t = eligible_pairs(geoms, targets.ref_x, targets.ref_y, params.buffer)
+        rays = sightlines(fp, targets, pair_b, pair_t)
+
+        # obstacles: buildings (b, index) and every crown (t, target index or -1 for non-targets)
+        tree_idx = np.full(len(trees), -1)
+        tree_idx[target_rows] = np.arange(len(target_rows))
+        obstacles = pd.concat([
+            pd.DataFrame({"kind": "b", "idx": near, "h": inputs.height[near],
+                          "wkb": shapely.to_wkb(inputs.geoms[near])}),
+            pd.DataFrame({"kind": "t", "idx": tree_idx, "h": trees["tree_height"].to_numpy(dtype=float),
+                          "wkb": shapely.to_wkb(crown_polygons(trees))}),
+        ], ignore_index=True)
+
+        sedona.createDataFrame(obstacles).selectExpr(
+            "kind", "CAST(idx AS BIGINT) AS idx", "CAST(h AS DOUBLE) AS h", "ST_GeomFromWKB(wkb) AS geometry"
+        ).createOrReplaceTempView(f"vis_obstacles_{sfx}")
+        sedona.createDataFrame(pd.DataFrame({"t_id": np.arange(len(targets)), "wkb": shapely.to_wkb(targets.crowns)})) \
+            .selectExpr("CAST(t_id AS BIGINT) AS t_id", "ST_GeomFromWKB(wkb) AS geometry") \
+            .createOrReplaceTempView(f"vis_crowns_{sfx}")
+        sedona.createDataFrame(rays).selectExpr(
+            "CAST(ray_id AS BIGINT) AS ray_id", "CAST(pair_id AS BIGINT) AS pair_id", "CAST(t_id AS BIGINT) AS t_id",
+            "ox", "oy", "tx", "ty", "tz", "len", "ST_MakeLine(ST_Point(ox, oy), ST_Point(tx, ty)) AS geometry",
+        ).createOrReplaceTempView(f"vis_rays_{sfx}")
+
+        z = sedona.sql(pair_zreq_sql(sfx, params.skip)).toPandas()
+        z_req = np.full(len(pair_b), np.inf)
+        z_req[z["pair_id"].to_numpy(dtype=np.int64)] = z["zreq"].to_numpy(dtype=float)
+
+        n_floors, z_top = floor_eyes(inputs.height[idx], params.storey_height, params.eye_height)
+        counts = building_counts(len(idx), pair_b, z_req, z_top, params.eye_height)
+        counts.insert(0, "building_id", inputs.building_id[idx])
+        counts["n_floors"] = n_floors
+        counts["building_height"] = inputs.height[idx]
+        counts["height_source"] = inputs.height_source[idx]
+        sub = inputs.overlay[["building_id", sub_geo_level]].drop_duplicates("building_id")
+        result = counts[OUTPUT_COLUMNS].merge(sub, on="building_id", how="left")
+        result.to_csv(out_path, index=False)
+        logger.info(
+            f"Visibility (vector): {geo_code} — {len(result)} buildings, {len(pair_b)} pairs, {len(rays)} sightlines "
+            f"in {time.time() - start:.1f}s"
         )
-        search_gdf["geometry"] = search_gdf.buffer(buffer)
-        _register_vis_buildings(sedona, geo_level, geo_code, buffer)
-
-        _register_vis_trees(
-            sedona, Path(cfg.data.trees_dir), search_gdf, cfg, geo_code, tree_area, tree_height
-        )
-
-        visible_df = compute_visibility(sedona, geo_code, buffer, observer_mode)
-        visible_df = _attach_sub_geo_level(sedona, visible_df, geo_level, geo_code, sub_geo_level)
-        visible_df.to_csv(out_path, index=False)
-
-        end_time = time.time()
-        logger.info(f"Visibility: {geo_code} — {len(visible_df)} records in {end_time - start_time:.2f}s")
-        return visible_df
-
+        return result
     except Exception:
-        logger.exception(f"Visibility: error processing {geo_code}")
+        logger.exception(f"Visibility (vector): error processing {geo_code}")
         return None
     finally:
-        drop_geo_views(sedona, geo_code)
-        sedona.catalog.dropTempView(f"vis_blocked_{view_suffix(geo_code)}")
+        for name in (f"vis_rays_{sfx}", f"vis_obstacles_{sfx}", f"vis_crowns_{sfx}"):
+            sedona.catalog.dropTempView(name)

@@ -31,11 +31,9 @@ def drop_geo_views(sedona: SparkSession, geo_code: str) -> None:
         f"binary_tiles_{sfx}",
         f"buildings_partitioned_{sfx}",
         f"t30b_trees_{sfx}",
-        f"vis_buildings_{sfx}",
-        f"vis_observers_{sfx}",
-        f"vis_trees_{sfx}",
+        f"vis_rays_{sfx}",
         f"vis_obstacles_{sfx}",
-        f"vis_pairs_{sfx}",
+        f"vis_crowns_{sfx}",
     ):
         sedona.catalog.dropTempView(name)
 

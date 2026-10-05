@@ -22,7 +22,7 @@ from rasterio.enums import Resampling
 class DSM:
     dsm: np.ndarray  # float32: max(buildings, vegetation)
     bldg: np.ndarray  # float32: buildings only (what still blocks inside a target's crown)
-    crown_id: np.ndarray  # int32: target index + 1 inside target crowns, else 0
+    crown_id: np.ndarray  # int32 (layers, rows, cols): target index + 1 inside target crowns, else 0
     x0: float
     y0: float
     res: float
@@ -93,9 +93,31 @@ def build_dsm(
         veg = _burn_max(np.asarray(veg_geoms), np.asarray(veg_h, dtype=float), shape, transform) \
             if veg_geoms is not None and len(veg_geoms) else np.zeros(shape, np.float32)
 
-    crown_id = np.zeros(shape, np.int32)
-    if len(target_crowns):
-        crown_id = rasterio.features.rasterize(
-            ((g, i + 1) for i, g in enumerate(target_crowns)), out=crown_id, transform=transform, dtype="int32",
+    layers = crown_layers(np.asarray(target_crowns))
+    crown_id = np.zeros((max(1, len(layers)), *shape), np.int32)
+    for k, members in enumerate(layers):
+        rasterio.features.rasterize(
+            ((target_crowns[i], i + 1) for i in members), out=crown_id[k], transform=transform, dtype="int32",
         )
     return DSM(np.maximum(bldg, veg), bldg, crown_id, x0, y0, res)
+
+
+def crown_layers(crowns: np.ndarray) -> list[list[int]]:
+    """Split crown indices into layers of mutually non-intersecting crowns (greedy colouring)."""
+    if len(crowns) == 0:
+        return []
+    import shapely
+
+    a, b = shapely.STRtree(crowns).query(crowns, predicate="intersects")
+    keep = a < b
+    neighbours: dict[int, list[int]] = {}
+    for i, j in zip(b[keep], a[keep]):  # j < i: colour i after its lower-index neighbours
+        neighbours.setdefault(int(i), []).append(int(j))
+    colour = np.zeros(len(crowns), np.int64)
+    for i in range(len(crowns)):
+        used = {colour[j] for j in neighbours.get(i, ())}
+        c = 0
+        while c in used:
+            c += 1
+        colour[i] = c
+    return [np.flatnonzero(colour == c).tolist() for c in range(colour.max() + 1)]

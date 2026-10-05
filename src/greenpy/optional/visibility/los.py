@@ -22,6 +22,14 @@ from numba import njit, prange
 
 
 @njit(cache=False, inline="always")
+def _in_crown(crown_id, j, i, tid):
+    for k in range(crown_id.shape[0]):
+        if crown_id[k, j, i] == tid + 1:
+            return True
+    return False
+
+
+@njit(cache=False, inline="always")
 def _ray_zreq(dsm, bldg, crown_id, x0, y0, res, ox, oy, tx, ty, tz, tid, skip0, skip1, best):
     """Required eye height for one ray, stopping early once it reaches `best` (returns >= best then)."""
     dx, dy = tx - ox, ty - oy
@@ -62,7 +70,7 @@ def _ray_zreq(dsm, bldg, crown_id, x0, y0, res, ox, oy, tx, ty, tz, tid, skip0, 
         ta = max(t_enter, t_lo)
         tb = min(t_exit, t_hi)
         if ta <= tb and 0 <= j < nrows and 0 <= i < ncols:
-            h = bldg[j, i] if crown_id[j, i] == tid + 1 else dsm[j, i]
+            h = bldg[j, i] if _in_crown(crown_id, j, i, tid) else dsm[j, i]
             if h > 0.0:
                 za = (h - ta * tz) / (1.0 - ta)
                 zb = (h - tb * tz) / (1.0 - tb)
@@ -135,7 +143,7 @@ def ray_zreq_reference(dsm, bldg, crown_id, x0, y0, res, ox, oy, tx, ty, tz, tid
     nrows, ncols = dsm.shape
     for j in range(nrows):
         for i in range(ncols):
-            h = bldg[j, i] if crown_id[j, i] == tid + 1 else dsm[j, i]
+            h = bldg[j, i] if (crown_id[:, j, i] == tid + 1).any() else dsm[j, i]
             if h <= 0:
                 continue
             cell = box(x0 + i * res, y0 - (j + 1) * res, x0 + (i + 1) * res, y0 - j * res)

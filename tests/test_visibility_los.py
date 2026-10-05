@@ -11,7 +11,7 @@ RES = 0.5
 
 
 def _grid(w, h):
-    return np.zeros((h, w), np.float32), np.zeros((h, w), np.float32), np.zeros((h, w), np.int32)
+    return np.zeros((h, w), np.float32), np.zeros((h, w), np.float32), np.zeros((1, h, w), np.int32)
 
 
 def _burn(arr, x0, y0, xmin, xmax, ymin, ymax, value, res=RES):
@@ -78,11 +78,11 @@ def test_target_crown_masked_but_other_crown_blocks():
     dsm, bldg, cid = _grid(80, 40)
     # target crown (tree 0) around x = 30 m, 10 m tall; another 12 m crown (tree 1) over x 18..22
     _burn(dsm, x0, y0, 27, 33, 7, 13, 10.0)
-    _burn(cid, x0, y0, 27, 33, 7, 13, 1)
+    _burn(cid[0], x0, y0, 27, 33, 7, 13, 1)
     obs, target = (1.0, 10.0), [(30.0, 10.0, 10.0)]
     assert _single_pair(dsm, bldg, cid, x0, y0, RES, obs, (1, 0), target) == -np.inf
     _burn(dsm, x0, y0, 18, 22, 7, 13, 12.0)
-    _burn(cid, x0, y0, 18, 22, 7, 13, 2)
+    _burn(cid[0], x0, y0, 18, 22, 7, 13, 2)
     assert _single_pair(dsm, bldg, cid, x0, y0, RES, obs, (1, 0), target) > 7.0
 
 
@@ -113,7 +113,7 @@ def test_kernel_matches_exact_reference(seed):
         j, i = rng.integers(0, 36, 2)
         dsm[j:j + rng.integers(1, 5), i:i + rng.integers(1, 5)] = rng.uniform(1, 25)
     bldg = dsm.copy()
-    cid = np.zeros_like(dsm, dtype=np.int32)
+    cid = np.zeros((1, *dsm.shape), dtype=np.int32)
     for _ in range(25):
         ox, oy, tx, ty = rng.uniform(100, 140), rng.uniform(220, 260), rng.uniform(100, 140), rng.uniform(220, 260)
         tz = rng.uniform(3, 20)
@@ -131,3 +131,20 @@ def test_z_stop_prunes_but_keeps_threshold_answers():
     exact = _single_pair(dsm, bldg, cid, x0, y0, RES, (0.5, 0.0), (1, 0), target)
     pruned = _single_pair(dsm, bldg, cid, x0, y0, RES, (0.5, 0.0), (1, 0), target, z_cap=16.5, z_stop=1.5)
     assert (pruned < 16.5) == (exact < 16.5) and (pruned < 1.5) == (exact < 1.5)
+
+
+def test_crowns_overlapping_the_target_do_not_block_inside_it():
+    x0, y0 = 0.0, 20.0
+    dsm, bldg, cid = _grid(80, 40)
+    cid = np.zeros((2, *dsm.shape), np.int32)
+    # target (tree 0, 10 m) and a taller 14 m tree (tree 1) whose crown overlaps the target's west half
+    _burn(dsm, x0, y0, 24, 33, 7, 13, 14.0)
+    _burn(dsm, x0, y0, 27, 33, 7, 13, 10.0)
+    _burn(cid[0], x0, y0, 27, 33, 7, 13, 1)
+    _burn(cid[1], x0, y0, 24, 30, 7, 13, 2)
+    obs, target = (1.0, 10.0), [(30.0, 10.0, 10.0)]
+    z = _single_pair(dsm, bldg, cid, x0, y0, RES, obs, (1, 0), target)
+    # only the part of tree 1 outside the target crown (x 24..27) blocks
+    ta, tb = (24 - 1) / 29, (27 - 1) / 29
+    expected = max((14 - ta * 10) / (1 - ta), (14 - tb * 10) / (1 - tb))
+    assert z == pytest.approx(expected, abs=0.4)
