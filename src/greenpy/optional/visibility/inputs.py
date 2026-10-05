@@ -1,6 +1,6 @@
 """Inputs the raster engine loads once per run: footprints with heights, the ownership overlay, a spatial index."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import geopandas as gpd
@@ -19,7 +19,8 @@ class VisibilityInputs:
     height: np.ndarray  # metres (every building has one: the heights chain fills defaults)
     height_source: np.ndarray
     tree: shapely.STRtree  # over geoms
-    overlay: pd.DataFrame  # building_id + geo level columns (one unit per building)
+    overlay: pd.DataFrame  # building_id, pos (index into the arrays above) + geo level columns
+    _codes: dict = field(default_factory=dict)  # geo level -> codes as str, per overlay row
 
     @classmethod
     def load(cls, cfg: GreenPyConfig, overlay_path: Path | None = None) -> "VisibilityInputs":
@@ -34,6 +35,10 @@ class VisibilityInputs:
             raise ValueError("Building heights do not match database/buildings.parquet — rerun `-p Heights`")
         overlay = pd.read_parquet(overlay_path or db / "census_buildings_overlay.parquet")
         overlay["building_id"] = overlay["building_id"].astype(str)
+        # each overlay row's index into the footprint arrays, so owned() is a plain filter
+        pos = pd.Series(np.arange(len(buildings)), index=buildings["building_id"].to_numpy())
+        overlay["pos"] = overlay["building_id"].map(pos[~pos.index.duplicated()])
+        overlay = overlay[overlay["pos"].notna()].astype({"pos": np.int64})
         geoms = shapely.make_valid(buildings.geometry.values)
         logger.info(f"Visibility: {len(buildings)} buildings; heights from {h['height_source'].value_counts().to_dict()}")
         return cls(
@@ -47,5 +52,6 @@ class VisibilityInputs:
 
     def owned(self, geo_level: str, geo_code: str) -> np.ndarray:
         """Indices of the buildings that geo_code owns (overlay: representative point in the unit)."""
-        ids = self.overlay.loc[self.overlay[geo_level].astype(str) == str(geo_code), "building_id"]
-        return np.flatnonzero(np.isin(self.building_id, ids.to_numpy()))
+        if geo_level not in self._codes:
+            self._codes[geo_level] = self.overlay[geo_level].astype(str).to_numpy()
+        return np.sort(self.overlay["pos"].to_numpy()[self._codes[geo_level] == str(geo_code)])

@@ -34,7 +34,7 @@ def _inputs(ids, geoms, heights):
     return VisibilityInputs(
         building_id=np.asarray(ids), geoms=geoms, height=np.asarray(heights, float),
         height_source=np.array(["native"] * len(ids)), tree=shapely.STRtree(geoms),
-        overlay=pd.DataFrame({"building_id": ids, "x": "A"}),
+        overlay=pd.DataFrame({"building_id": ids, "x": "A", "pos": np.arange(len(ids))}),
     )
 
 
@@ -148,3 +148,15 @@ def test_raster_matches_exact_prisms_away_from_thresholds(seed):
             assert (z_raster[p] < eye) == (z_exact < eye), (seed, b, t, eye, z_raster[p], z_exact)
             checked += 1
     assert checked > 50
+
+
+def test_crown_layers_separate_overlaps_not_touches():
+    from greenpy.optional.visibility.dsm import crown_layers
+
+    crowns = np.array([box(0, 0, 2, 2), box(2, 0, 4, 2), box(1, 1, 3, 3), box(0, 0, 2, 2), box(10, 10, 11, 11)])
+    layers = crown_layers(crowns)
+    where = {i: k for k, members in enumerate(layers) for i in members}
+    assert where[0] == where[1]  # touching neighbours share a layer
+    assert where[2] != where[0] and where[2] != where[1]  # overlaps both
+    assert where[3] != where[0]  # duplicate
+    assert sorted(i for m in layers for i in m) == [0, 1, 2, 3, 4]

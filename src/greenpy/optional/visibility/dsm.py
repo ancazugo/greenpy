@@ -103,12 +103,20 @@ def build_dsm(
 
 
 def crown_layers(crowns: np.ndarray) -> list[list[int]]:
-    """Split crown indices into layers of mutually non-intersecting crowns (greedy colouring)."""
+    """Split crown indices into layers of crowns that do not overlap (greedy colouring).
+
+    Crowns that merely touch (segmented neighbours) share a layer; ones whose
+    interiors overlap, or that contain one another (duplicates, nested
+    crowns), do not.
+    """
     if len(crowns) == 0:
         return []
     import shapely
 
-    a, b = shapely.STRtree(crowns).query(crowns, predicate="intersects")
+    tree = shapely.STRtree(crowns)
+    a1, b1 = tree.query(crowns, predicate="overlaps")
+    a2, b2 = tree.query(crowns, predicate="contains")
+    a, b = np.concatenate([a1, a2, b2]), np.concatenate([b1, b2, a2])
     keep = a < b
     neighbours: dict[int, list[int]] = {}
     for i, j in zip(b[keep], a[keep]):  # j < i: colour i after its lower-index neighbours

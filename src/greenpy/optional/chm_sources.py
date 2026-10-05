@@ -18,6 +18,7 @@ same way:
 
 import hashlib
 import math
+import os
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -126,6 +127,7 @@ def download_meta_tiles(boundary_gdf: gpd.GeoDataFrame, cache_dir: Path, overwri
     for qk in keys:
         path = out_dir / f"{qk}.tif"
         if path.exists() and not overwrite:
+            ensure_tiled(path)
             paths.append(str(path))
             continue
         url = META_CHM_URL.format(quadkey=qk)
@@ -144,8 +146,33 @@ def download_meta_tiles(boundary_gdf: gpd.GeoDataFrame, cache_dir: Path, overwri
                 part.unlink()
                 raise IOError(f"Incomplete download of Meta CHM tile {qk}")
             part.rename(path)
+        ensure_tiled(path)
         paths.append(str(path))
     return paths
+
+
+def ensure_tiled(path: Path, block: int = 512, threads: int = 8) -> None:
+    """Rewrite a GeoTIFF stored in strips as an internally tiled one (same pixels), in place.
+
+    Meta's tiles are 65,536 px wide single-row strips, so any window read
+    decompresses whole rows across the tile — reading a 2 km window meant
+    decompressing ~65x more pixels than needed, every time. Tiled blocks make
+    windowed and warped reads touch only the blocks they need.
+    """
+    import rasterio.shutil
+
+    path = Path(path)
+    with rasterio.open(path) as src:
+        bh, bw = src.block_shapes[0]
+        if bh >= block and bw >= block or src.width <= block:
+            return
+        profile = {"tiled": True, "blockxsize": block, "blockysize": block,
+                   "compress": (src.compression.value if src.compression else "deflate"),
+                   "num_threads": str(threads), "bigtiff": "IF_SAFER"}
+    logger.info(f"Re-tiling {path.name} ({bh}x{bw} px strips -> {block} px tiles), once per tile")
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.retile")
+    rasterio.shutil.copy(path, tmp, driver="GTiff", **profile)
+    tmp.replace(path)
 
 
 # --------------------------------------------------------------------------- #

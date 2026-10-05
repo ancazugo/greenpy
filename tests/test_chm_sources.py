@@ -202,3 +202,24 @@ def test_geo_codes_own_disjoint_trees(tmp_path):
     # T3's loader picks the parquet files up from the directory
     trees = load_trees_gdf(tmp_path / "trees", boundaries, cfg)
     assert len(trees) == len(whole) and {"tree_height", "tree_area"} <= set(trees.columns)
+
+
+def test_ensure_tiled_rewrites_strips_keeping_pixels(tmp_path):
+    import numpy as np
+    import rasterio
+    from rasterio.transform import from_origin
+
+    from greenpy.optional.chm_sources import ensure_tiled
+
+    path = tmp_path / "strips.tif"
+    arr = (np.arange(2048 * 1024) % 251).reshape(1024, 2048).astype("uint8")
+    with rasterio.open(path, "w", driver="GTiff", width=2048, height=1024, count=1, dtype="uint8",
+                       crs="EPSG:3857", transform=from_origin(0, 0, 1, 1), compress="deflate", blockysize=1) as dst:
+        dst.write(arr, 1)
+    with rasterio.open(path) as src:
+        assert src.block_shapes[0] == (1, 2048)
+    ensure_tiled(path, block=256)
+    with rasterio.open(path) as src:
+        assert src.block_shapes[0] == (256, 256) and src.crs.to_epsg() == 3857
+        assert (src.read(1) == arr).all()
+    ensure_tiled(path, block=256)  # already tiled: no-op
