@@ -14,6 +14,7 @@ from .schema import (
     OvertureConfig,
     OutputPaths,
     TileSystemConfig,
+    TerrainConfig,
     TreeSegmentationConfig,
     VisibilityConfig,
     building_source,
@@ -49,6 +50,10 @@ def load_config(path: str | Path) -> GreenPyConfig:
     tree_seg_cfg = _parse_tree_segmentation_section(raw.get("tree_segmentation") or {})
     heights_cfg = _parse_heights_section(raw.get("heights") or {})
     visibility_cfg = _parse_visibility_section(raw.get("visibility") or {})
+    terrain_cfg = _parse_terrain_section(raw["terrain"] if "terrain" in raw else {})
+    context_buffer = raw.get("context_buffer", 100.0)
+    if isinstance(context_buffer, bool) or not isinstance(context_buffer, (int, float)) or context_buffer < 0:
+        raise ValueError(f"context_buffer must be a non-negative number (metres), got {context_buffer!r}")
 
     output_raw = raw["output"]
     _require_section(output_raw, "output", "base_dir")
@@ -120,6 +125,8 @@ def load_config(path: str | Path) -> GreenPyConfig:
         tree_segmentation=tree_seg_cfg,
         heights=heights_cfg,
         visibility=visibility_cfg,
+        terrain=terrain_cfg,
+        context_buffer=float(context_buffer),
     )
 
 
@@ -381,6 +388,24 @@ def _parse_visibility_section(v_raw: dict) -> VisibilityConfig:
         raise ValueError(f"visibility.end_skip must be null or a non-negative number, got {cfg.end_skip!r}")
     if not isinstance(cfg.mask_chm_buildings, bool):
         raise ValueError("visibility.mask_chm_buildings must be true or false")
+    return cfg
+
+
+def _parse_terrain_section(t_raw) -> TerrainConfig:
+    from ..terrain import DEM_SOURCES
+
+    if t_raw is None:  # `terrain:` left empty or null: flat ground
+        return TerrainConfig(source=None)
+    if not isinstance(t_raw, dict):
+        raise ValueError("terrain must be a mapping, e.g. {source: fabdem}")
+    unknown = set(t_raw) - {"source", "resolution"}
+    if unknown:
+        raise ValueError(f"Unknown terrain keys {sorted(unknown)}; expected ['resolution', 'source']")
+    cfg = TerrainConfig(**t_raw)
+    if cfg.source is not None and not isinstance(cfg.source, str):
+        raise ValueError(f"terrain.source must be one of {sorted(DEM_SOURCES)}, a raster path or null")
+    if isinstance(cfg.resolution, bool) or not isinstance(cfg.resolution, (int, float)) or cfg.resolution <= 0:
+        raise ValueError(f"terrain.resolution must be a positive number (metres), got {cfg.resolution!r}")
     return cfg
 
 

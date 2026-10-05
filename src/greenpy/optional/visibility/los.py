@@ -9,7 +9,10 @@ ray's required eye height; visibility only improves as the observer rises
 (flat ground), so a tree is visible from every floor whose eye is strictly
 above the minimum over the pair's rays (grazing counts as blocked).
 
-Cells are visited exactly (Amanatides–Woo grid traversal). The first skip0
+With terrain the same holds in absolute elevation: the surface is ground
+plus buildings or vegetation, the target sits on the ground under it, and
+the required height is returned above the ground under the observer (bare
+ground then blocks too). Cells are visited exactly (Amanatides–Woo grid traversal). The first skip0
 and last skip1 metres of each ray are ignored (rasterisation slack at the
 facade and the target). Inside the target tree's own crown (crown_id) only
 the building surface counts, so a tree never hides itself.
@@ -30,8 +33,11 @@ def _in_crown(crown_id, j, i, tid):
 
 
 @njit(cache=False, inline="always")
-def _ray_zreq(dsm, bldg, crown_id, x0, y0, res, ox, oy, tx, ty, tz, tid, skip0, skip1, best):
-    """Required eye height for one ray, stopping early once it reaches `best` (returns >= best then)."""
+def _ray_zreq(dsm, bldg, crown_id, x0, y0, res, ox, oy, tx, ty, tz, tid, skip0, skip1, best, skip_ground):
+    """Required observer elevation for one ray, stopping early once it reaches `best` (returns >= best then).
+
+    Cells of height <= 0 are skipped when skip_ground (flat ground at 0, where they cannot block).
+    """
     dx, dy = tx - ox, ty - oy
     length = math.sqrt(dx * dx + dy * dy)
     if length <= skip0 + skip1:
@@ -71,7 +77,7 @@ def _ray_zreq(dsm, bldg, crown_id, x0, y0, res, ox, oy, tx, ty, tz, tid, skip0, 
         tb = min(t_exit, t_hi)
         if ta <= tb and 0 <= j < nrows and 0 <= i < ncols:
             h = bldg[j, i] if _in_crown(crown_id, j, i, tid) else dsm[j, i]
-            if h > 0.0:
+            if h > 0.0 or not skip_ground:
                 za = (h - ta * tz) / (1.0 - ta)
                 zb = (h - tb * tz) / (1.0 - tb)
                 z = za if za > zb else zb
@@ -91,12 +97,12 @@ def _ray_zreq(dsm, bldg, crown_id, x0, y0, res, ox, oy, tx, ty, tz, tid, skip0, 
     return zreq
 
 
-@njit(parallel=True, cache=False)
 def pair_min_eye_height(
     dsm, bldg, crown_id, x0, y0, res,
     ox, oy, onx, ony, ob_start, ob_count,
     tx, ty, tz, tt_start, tt_count,
     pair_b, pair_t, z_cap, z_stop, skip0, skip1,
+    go=None, gt=None, skip_ground=True,
 ):
     """Per pair, the lowest eye height (over the building's facade points and the tree's
     target points) from which the tree is visible; inf when that is not below z_cap[b].
@@ -104,8 +110,26 @@ def pair_min_eye_height(
     Facade points whose wall faces away from the target are skipped. A pair
     stops searching once some ray needs less than z_stop (e.g. the ground-floor
     eye height), so results below z_stop are only known to be < z_stop. Pass
-    z_cap = inf and z_stop = -inf for exact values.
+    z_cap = inf and z_stop = -inf for exact values. With terrain, dsm/bldg are
+    absolute elevations, go / gt the ground under each facade / target point
+    (target heights tz stay above their ground), skip_ground False; eye heights
+    and z_cap stay relative to the ground under the observer.
     """
+    go = np.zeros(len(ox)) if go is None else np.asarray(go, dtype=np.float64)
+    gt = np.zeros(len(tx)) if gt is None else np.asarray(gt, dtype=np.float64)
+    return _pair_kernel(
+        dsm, bldg, crown_id, x0, y0, res, ox, oy, onx, ony, ob_start, ob_count,
+        tx, ty, tz, tt_start, tt_count, pair_b, pair_t, z_cap, z_stop, skip0, skip1, go, gt, skip_ground,
+    )
+
+
+@njit(parallel=True, cache=False)
+def _pair_kernel(
+    dsm, bldg, crown_id, x0, y0, res,
+    ox, oy, onx, ony, ob_start, ob_count,
+    tx, ty, tz, tt_start, tt_count,
+    pair_b, pair_t, z_cap, z_stop, skip0, skip1, go, gt, skip_ground,
+):
     n = pair_b.shape[0]
     out = np.empty(n, dtype=np.float64)
     for p in prange(n):
@@ -117,8 +141,8 @@ def pair_min_eye_height(
             for ko in range(ob_start[b], ob_start[b] + ob_count[b]):
                 if onx[ko] * (tx[kt] - ox[ko]) + ony[ko] * (ty[kt] - oy[ko]) <= 0.0:
                     continue
-                z = _ray_zreq(dsm, bldg, crown_id, x0, y0, res, ox[ko], oy[ko], tx[kt], ty[kt], tz[kt],
-                              t, skip0, skip1, best)
+                z = _ray_zreq(dsm, bldg, crown_id, x0, y0, res, ox[ko], oy[ko], tx[kt], ty[kt], tz[kt] + gt[kt],
+                              t, skip0, skip1, best + go[ko], skip_ground) - go[ko]
                 if z < best:
                     best = z
                     if best < z_stop:
@@ -129,7 +153,7 @@ def pair_min_eye_height(
     return out
 
 
-def ray_zreq_reference(dsm, bldg, crown_id, x0, y0, res, ox, oy, tx, ty, tz, tid, skip0, skip1) -> float:
+def ray_zreq_reference(dsm, bldg, crown_id, x0, y0, res, ox, oy, tx, ty, tz, tid, skip0, skip1, skip_ground=True) -> float:
     """Pure-Python exact reference for one ray: intersects the sightline with every cell box (shapely)."""
     import shapely
     from shapely.geometry import LineString, box
@@ -144,7 +168,7 @@ def ray_zreq_reference(dsm, bldg, crown_id, x0, y0, res, ox, oy, tx, ty, tz, tid
     for j in range(nrows):
         for i in range(ncols):
             h = bldg[j, i] if (crown_id[:, j, i] == tid + 1).any() else dsm[j, i]
-            if h <= 0:
+            if h <= 0 and skip_ground:
                 continue
             cell = box(x0 + i * res, y0 - (j + 1) * res, x0 + (i + 1) * res, y0 - j * res)
             inter = line.intersection(cell)

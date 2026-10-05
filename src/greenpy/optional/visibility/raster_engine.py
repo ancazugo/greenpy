@@ -18,6 +18,7 @@ from loguru import logger
 from shapely.geometry import box
 
 from ...config.schema import GreenPyConfig
+from ...terrain import dem_layers as terrain_layers
 from ...utils.data_processing import load_trees_gdf
 from .dsm import build_dsm
 from .inputs import VisibilityInputs
@@ -78,6 +79,7 @@ def target_mask(trees: gpd.GeoDataFrame, params: VisibilityParams) -> np.ndarray
 def visibility_for_buildings(
     idx: np.ndarray, inputs: VisibilityInputs, trees: gpd.GeoDataFrame, params: VisibilityParams,
     cfg: GreenPyConfig, chm_layers: list | None, n_floors: np.ndarray, z_top: np.ndarray,
+    dem_layers: list | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     """Counts for buildings idx (one tile); also returns (pair building position, z_req) for inspection."""
     geoms = inputs.geoms[idx]
@@ -99,7 +101,7 @@ def visibility_for_buildings(
         target_crowns=targets.crowns,
         veg_geoms=None if chm_layers else crown_polygons(tb),
         veg_h=None if chm_layers else tb["tree_height"].to_numpy(dtype=float),
-        chm_layers=chm_layers, mask_chm_buildings=params.mask_chm_buildings,
+        chm_layers=chm_layers, mask_chm_buildings=params.mask_chm_buildings, dem_layers=dem_layers,
     )
 
     fp = facade_points(geoms, params.facade_spacing, params.facade_offset, blockers=blockers)
@@ -108,6 +110,7 @@ def visibility_for_buildings(
         fp.x, fp.y, fp.nx, fp.ny, fp.start, fp.count,
         targets.x, targets.y, targets.z, targets.start, targets.count,
         pair_b, pair_t, z_top, params.eye_height, params.skip, params.skip,
+        go=dsm.ground_at(fp.x, fp.y), gt=dsm.ground_at(targets.x, targets.y), skip_ground=not dsm.terrain,
     )
     counts = building_counts(len(idx), pair_b, z_req, z_top, params.eye_height)
     counts.insert(0, "building_id", inputs.building_id[idx])
@@ -146,13 +149,12 @@ def process_geo_code_raster(
 
         parts, n_pairs = [], 0
         for (kx, ky), pos in tiles.items():
-            chm_layers = None
-            if mode == "chm":
-                g = inputs.geoms[idx[pos]]
-                b = shapely.total_bounds(g)
-                chm_layers = _chm_layers(cfg, (b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad), f"vis_{geo_code}_{kx}_{ky}")
+            b = shapely.total_bounds(inputs.geoms[idx[pos]])
+            tile_bounds = (b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad)
+            chm_layers = _chm_layers(cfg, tile_bounds, f"vis_{geo_code}_{kx}_{ky}") if mode == "chm" else None
             counts, pair_b, _ = visibility_for_buildings(
                 idx[pos], inputs, trees, params, cfg, chm_layers, n_floors[pos], z_top[pos],
+                dem_layers=terrain_layers(cfg, tile_bounds),
             )
             parts.append(counts)
             n_pairs += len(pair_b)
@@ -163,7 +165,8 @@ def process_geo_code_raster(
         result.to_csv(out_path, index=False)
         logger.info(
             f"Visibility: {geo_code} — {len(result)} buildings, {n_pairs} building-tree pairs, {len(tiles)} tiles "
-            f"({mode} vegetation) in {time.time() - start:.1f}s; mean visible {result['visible_trees'].mean():.2f} "
+            f"({mode} vegetation, {'terrain ' + cfg.terrain.source if cfg.terrain.source else 'flat ground'}) "
+            f"in {time.time() - start:.1f}s; mean visible {result['visible_trees'].mean():.2f} "
             f"of {result['candidate_trees'].mean():.2f} candidates"
         )
         return result

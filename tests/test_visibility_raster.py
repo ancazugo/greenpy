@@ -160,3 +160,20 @@ def test_crown_layers_separate_overlaps_not_touches():
     assert where[2] != where[0] and where[2] != where[1]  # overlaps both
     assert where[3] != where[0]  # duplicate
     assert sorted(i for m in layers for i in m) == [0, 1, 2, 3, 4]
+
+
+def test_dsm_with_terrain_puts_buildings_and_vegetation_on_the_ground(tmp_path):
+    dem = tmp_path / "dem.tif"
+    xs = np.arange(40) + 0.5
+    arr = np.tile(100 + 0.5 * xs, (40, 1)).astype("float32")  # slope: 100 m at x=0 to 120 m at x=40
+    with rasterio.open(dem, "w", driver="GTiff", width=40, height=40, count=1, dtype="float32", crs=CRS,
+                       transform=from_origin(0, 40, 1, 1)) as dst:
+        dst.write(arr, 1)
+    d = build_dsm((0, 0, 40, 40), 1.0, CRS, np.array([box(10, 10, 20, 20)]), np.array([9.0]), np.array([]),
+                  veg_geoms=np.array([Point(30, 30).buffer(2)]), veg_h=np.array([6.0]), dem_layers=[dem])
+    assert d.terrain
+    base = d.ground_at([15.0], [15.0])[0]
+    assert d.dsm[25, 15] == pytest.approx(base + 9.0, abs=0.01)  # flat roof at base + height
+    assert d.dsm[25, 11] == d.dsm[25, 18]
+    assert d.bldg[5, 35] == pytest.approx(d.ground[5, 35])  # bare ground elsewhere
+    assert d.dsm[10, 30] == pytest.approx(d.ground[10, 30] + 6.0)  # canopy on the ground

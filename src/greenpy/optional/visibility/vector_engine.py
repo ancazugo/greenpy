@@ -11,7 +11,8 @@ crossing over fractions [f_lo, f_hi] of the sightline (crowns clipped by the
 target's crown, inside which only buildings block), an obstacle of height
 h needs an eye height above max over {f_lo, f_hi} of (h - f*zt) / (1 - f);
 the sightline needs the maximum over its crossings, the pair the minimum
-over its sightlines. Ground is flat; skip metres at both ends are ignored.
+over its sightlines. Ground is flat (terrain is raster-engine only); skip
+metres at both ends are ignored.
 """
 
 import time
@@ -115,6 +116,9 @@ def process_geo_code(
         return pd.read_csv(out_path)
     sfx = view_suffix(geo_code)
     params = VisibilityParams.from_cfg(cfg, buffer, tree_area, tree_height)
+    if cfg.terrain.source is not None:
+        logger.warning(f"Visibility (vector): terrain ({cfg.terrain.source}) is modelled by the raster engine only — "
+                       "the vector engine assumes flat ground")
     try:
         inputs = _inputs(cfg, overlay_path)
         idx = inputs.owned(geo_level, geo_code)

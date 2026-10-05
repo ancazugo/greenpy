@@ -89,3 +89,23 @@ def test_example_configs_still_load():
     from pathlib import Path
     for path in sorted(Path(__file__).parents[1].glob("examples/*.yaml")):
         load_config(path)
+
+
+def test_terrain_and_context_defaults(tmp_path):
+    cfg = _load(tmp_path)
+    assert cfg.terrain.source == "fabdem" and cfg.terrain.resolution == 30.0
+    assert cfg.context_buffer == 100.0
+    flat = _load(tmp_path, terrain=None, context_buffer=0)
+    assert flat.terrain.source is None and flat.context_buffer == 0.0
+    assert _load(tmp_path, terrain={"source": "/data/dtm.tif", "resolution": 5}).terrain.resolution == 5
+
+
+@pytest.mark.parametrize("overrides, match", [
+    ({"terrain": {"source": "fabdem", "res": 10}}, "Unknown terrain keys"),
+    ({"terrain": {"resolution": 0}}, "resolution"),
+    ({"terrain": "fabdem"}, "mapping"),
+    ({"context_buffer": -5}, "context_buffer"),
+])
+def test_bad_terrain_rejected(tmp_path, overrides, match):
+    with pytest.raises(ValueError, match=match):
+        _load(tmp_path, **overrides)

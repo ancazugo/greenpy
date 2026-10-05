@@ -182,6 +182,9 @@ columns:
 
 output:
   base_dir: {out_dir}/
+
+# synthetic coordinates: real terrain there would break the deterministic checks
+terrain: null
 """
     (target / "config.yaml").write_text(config)
 

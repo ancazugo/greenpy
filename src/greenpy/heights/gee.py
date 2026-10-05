@@ -47,6 +47,17 @@ def tiles_with_footprints(buildings: gpd.GeoDataFrame, res: float, tile_px: int 
     return sorted(tiles)
 
 
+def tiles_for_extent(bounds: tuple, res: float, tile_px: int = TILE_PX) -> list[tuple[int, int]]:
+    """(row, col) of the tile_px*res grid tiles (aligned to multiples of the tile side) covering bounds."""
+    side = res * tile_px
+    minx, miny, maxx, maxy = bounds
+    return [
+        (r, c)
+        for r in range(int(np.floor(miny / side)), int(np.floor(maxy / side)) + 1)
+        for c in range(int(np.floor(minx / side)), int(np.floor(maxx / side)) + 1)
+    ]
+
+
 def download_image_tiles(
     make_image, band: str, crs: str, res: float, tiles: list[tuple[int, int]], out_dir: Path,
     project: str | None, tile_px: int = TILE_PX, workers: int = 4,

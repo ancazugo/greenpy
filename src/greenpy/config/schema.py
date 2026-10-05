@@ -220,6 +220,18 @@ class VisibilityConfig:
 
 
 @dataclass
+class TerrainConfig:
+    """Ground elevation under buildings and trees for Visibility (raster engine)."""
+
+    # "fabdem" (bare-earth Copernicus, buildings and forests removed; CC BY-NC-SA 4.0),
+    # "copernicus" (GLO-30) or "nasadem" (both surface models: in cities they include
+    # rooftops and canopy), a local DTM raster file/directory, or null for flat ground
+    source: str | None = "fabdem"
+    # Download resolution (m) for the GEE sources (native ~30 m)
+    resolution: float = 30.0
+
+
+@dataclass
 class GreenPyConfig:
     study_area_name: str
     crs: str
@@ -248,3 +260,7 @@ class GreenPyConfig:
     # Options for the Heights process (building heights) and the Visibility process
     heights: HeightsConfig = field(default_factory=HeightsConfig)
     visibility: VisibilityConfig = field(default_factory=VisibilityConfig)
+    terrain: TerrainConfig = field(default_factory=TerrainConfig)
+    # Metres around the study area from which context is gathered: buildings that block
+    # views (Visibility) and trees that count for edge buildings (Trees -> T3, Visibility)
+    context_buffer: float = 100.0

@@ -148,3 +148,73 @@ def test_crowns_overlapping_the_target_do_not_block_inside_it():
     ta, tb = (24 - 1) / 29, (27 - 1) / 29
     expected = max((14 - ta * 10) / (1 - ta), (14 - tb * 10) / (1 - tb))
     assert z == pytest.approx(expected, abs=0.4)
+
+
+# --------------------------------------------------------------------------- terrain
+
+def _terrain_pair(ground, extra, obs, target, x0=0.0, y0=20.0, z_cap=np.inf):
+    """One-ray pair over absolute surface ground + extra; target height relative to its ground."""
+    from greenpy.optional.visibility.dsm import sample_grid
+
+    dsm = (ground + extra).astype(np.float32)
+    bldg = (ground + extra).astype(np.float32)
+    cid = np.zeros((1, *dsm.shape), np.int32)
+    go = sample_grid(ground, x0, y0, RES, [obs[0]], [obs[1]])
+    gt = sample_grid(ground, x0, y0, RES, [target[0]], [target[1]])
+    return pair_min_eye_height(
+        dsm, bldg, cid, x0, y0, RES, np.array([obs[0]]), np.array([obs[1]]), np.array([1.0]), np.array([0.0]),
+        np.array([0]), np.array([1]), np.array([target[0]]), np.array([target[1]]), np.array([target[2]]),
+        np.array([0]), np.array([1]), np.array([0]), np.array([0]), np.array([z_cap]), -np.inf, 0.5, 0.5,
+        go=go, gt=gt, skip_ground=False,
+    )[0]
+
+
+def test_ridge_hides_a_tree_on_flat_ground_beyond():
+    ground = np.zeros((40, 100), np.float32)
+    _burn(ground, 0.0, 20.0, 14, 16, -100, 100, 12.0)  # 12 m ridge at x 14..16
+    z = _terrain_pair(ground, np.zeros_like(ground), (1.0, 10.0), (40.0, 10.0, 10.0))
+    ta, tb = 13 / 39, 15 / 39
+    assert z == pytest.approx(max((12 - ta * 10) / (1 - ta), (12 - tb * 10) / (1 - tb)), abs=0.4)
+    assert z > 1.5  # not from the ground floor
+
+
+def test_window_on_high_ground_sees_over_a_wall():
+    x = (np.arange(100) + 0.5) * RES
+    ground = np.tile(np.where(x < 5, 20.0, 0.0), (40, 1)).astype(np.float32)  # observer on a 20 m terrace
+    wall = np.zeros_like(ground)
+    _burn(wall, 0.0, 20.0, 10, 14, -100, 100, 8.0)
+    z = _terrain_pair(ground, wall, (1.0, 10.0), (40.0, 10.0, 10.0))
+    assert z < 1.5  # visible from the ground floor of the terrace house
+    flat = _terrain_pair(np.zeros_like(ground), wall, (1.0, 10.0), (40.0, 10.0, 10.0))
+    assert flat > 1.5  # the same scene on flat ground is blocked
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_terrain_kernel_matches_reference(seed):
+    rng = np.random.default_rng(seed)
+    x0, y0, res = 0.0, 40.0, 1.0
+    yy, xx = np.mgrid[0:40, 0:40]
+    ground = (5 * np.sin(xx / 6.0 + seed) + 3 * np.cos(yy / 5.0)).astype(np.float32) + 10
+    extra = np.zeros_like(ground)
+    for _ in range(8):
+        j, i = rng.integers(0, 36, 2)
+        extra[j:j + 3, i:i + 3] = rng.uniform(3, 20)
+    surf = (ground + extra).astype(np.float32)
+    cid = np.zeros((1, 40, 40), np.int32)
+    from greenpy.optional.visibility.dsm import sample_grid
+    for _ in range(15):
+        ox, oy, tx, ty = rng.uniform(1, 39, 4)
+        tz = rng.uniform(3, 15)
+        go = sample_grid(ground, x0, y0, res, [ox], [oy])[0]
+        gt = sample_grid(ground, x0, y0, res, [tx], [ty])[0]
+        ref = ray_zreq_reference(surf, surf, cid, x0, y0, res, ox, oy, tx, ty, tz + gt, 0, 0.5, 0.5, skip_ground=False)
+        got = pair_min_eye_height(
+            surf, surf, cid, x0, y0, res, np.array([ox]), np.array([oy]), np.array([tx - ox]), np.array([ty - oy]),
+            np.array([0]), np.array([1]), np.array([tx]), np.array([ty]), np.array([tz]), np.array([0]), np.array([1]),
+            np.array([0]), np.array([0]), np.array([np.inf]), -np.inf, 0.5, 0.5,
+            go=np.array([go]), gt=np.array([gt]), skip_ground=False,
+        )[0]
+        if math.isinf(ref):
+            assert got == ref
+        else:
+            assert got == pytest.approx(ref - go, rel=1e-5, abs=1e-4)
