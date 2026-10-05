@@ -82,11 +82,9 @@ columns:
   # GeoPackage layer name for buildings (null = default/only layer)
   building_layer: null
 
-  # Building height column in metres — required only for the optional Visibility
-  # module. Complete height coverage is expected: buildings (and trees) with a
-  # missing height are skipped entirely, with a warning. Not available for
-  # buildings: osm or open_buildings (no heights); buildings: overture maps its
-  # own height attribute automatically (sparse outside major cities).
+  # Building height column (metres) of a file source, read by the "native"
+  # height source (see heights below); OSM and Overture heights are mapped
+  # automatically.
   building_height_col: null
 
   # Road network column names
@@ -181,6 +179,56 @@ tree_segmentation:
   block_size: 2048
   # polygon crowns, or point crown centroids (faster; T3 only needs centroids)
   geometry: polygon
+
+# Heights process (`-p Heights`): one height per building for Visibility,
+# from an ordered chain of sources — for each building the first valid height
+# wins. Sources: native (the footprints' own height, else floor count x
+# storey_height; options: levels_col), gba (GlobalBuildingAtlas, global,
+# CC BY-NC 4.0: non-commercial only), utglobus (UT-GLOBUS; city: required),
+# open_buildings_temporal (Global South; year, presence_threshold,
+# resolution), ghs_built_h (global 100 m fallback; resolution), file (path:
+# a vector with a height column — column, layer — or a raster file/directory
+# — stat: median|mean|max). Remote sources go through GEE (gee_project) and
+# are cached under data.chm_cache_dir. Add `name:` to label an entry.
+heights:
+  sources:
+    - native
+    # - gba
+    # - {source: open_buildings_temporal, year: 2023}
+    # - ghs_built_h
+  # Height for buildings no source covers (height_source: default)
+  default_height: 6.0
+  # Metres per floor: floor counts -> heights, and Visibility's floor spacing
+  storey_height: 3.0
+  # Vector sources must cover at least this share of a footprint
+  min_overlap: 0.3
+  # Heights outside this range count as missing (the next source is tried)
+  min_height: 2.0
+  max_height: 300.0
+
+# Visibility process: trees seen from each building's windows.
+visibility:
+  # raster (surface-model ray casting, default) or vector (exact Sedona
+  # geometry, for small areas); --vis_engine overrides
+  engine: raster
+  # Windows: a point every facade_spacing m around the footprint,
+  # facade_offset m outside the wall, at eye_height above each floor
+  facade_spacing: 5.0
+  facade_offset: 0.5
+  eye_height: 1.5
+  # Targets: the treetop plus crown_points points on the crown at
+  # crown_point_height x tree height (0 = treetop only)
+  crown_points: 4
+  crown_point_height: 0.667
+  # Raster engine: surface pixel size (m); vegetation from the CHM when one
+  # is configured (auto), always (chm) or from the tree crowns (crowns);
+  # whether CHM pixels on roofs are dropped; tile side (m)
+  resolution: 1.0
+  vegetation: auto
+  mask_chm_buildings: true
+  tile_size: 2000
+  # Metres ignored at both ends of each sightline (null = resolution)
+  end_skip: null
 
 # Tile system — legacy key kept for older configs; tree and CHM tile
 # directories are always searched by file extent, whatever this is set to

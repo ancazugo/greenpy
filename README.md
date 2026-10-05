@@ -20,7 +20,8 @@ greenpy computes each metric per building and per census unit from standard geos
 | `T30_buildings` | Canopy cover % within `--buffer` metres of each building (distributed Sedona `RS_ZonalStats` for raster sources), same canopy sources as T30 | `building_id`, `tree_pixels`, `total_pixels`, `canopy_cover` |
 | `T300` | Road-network and Euclidean distance from each building to the nearest park | `building_id`, distances, closest park ids, sub-geo code |
 | `Tree_count` | Total tree count per sub-geo unit, each tree counted once in the unit containing its centroid (no size filter, unlike T3) | sub-geo code, `tree_count` |
-| `Visibility` *(optional)* | Trees actually visible from each building via 2.5D line-of-sight, accounting for obstruction by other buildings and trees | `building_id`, `visible_trees_bottom/_middle/_top`, `visible_trees`, sub-geo code |
+| `Heights` | A height for every building footprint from an ordered chain of sources (footprint attributes, GlobalBuildingAtlas, UT-GLOBUS, Open Buildings 2.5D Temporal, GHS-BUILT-H, local files) | `database/building_heights_<key>.parquet`: `building_height`, `height_source`, `height_quality` |
+| `Visibility` *(optional)* | Trees within `--buffer` metres that can be seen from some window of each building, with buildings and trees blocking the view | `building_id`, `visible_trees`, `visible_trees_ground`, `candidate_trees`, `n_floors`, `building_height`, `height_source`, sub-geo code |
 | `Spectral` *(optional)* | Spectral indices (NDVI, NDWI, …) per sub-geo unit via Google Earth Engine: a per-pixel temporal composite over the date range (`--composite max`, the default, or `median`), then the spatial median over each unit | sub-geo code, one column per index |
 | `Merge` | Evaluates the 3-30-300 rule per building and consolidates all module outputs into `database/T3_30_300_spectral.parquet` | one row per geo unit (see *Merge* below) |
 
@@ -95,7 +96,7 @@ The core 3-30-300 pipeline (T3, T30, T300, Tree_count, Visibility, Merge) with l
 
 All inputs are vector files readable by GeoPandas (GeoPackage, Shapefile, GeoJSON, (Geo)Parquet…):
 
-- **Buildings** — footprint polygons with a unique id column. Instead of a file, `data.buildings` also accepts `osm` (OpenStreetMap; no heights), `overture` (Overture Maps, global; `height` feeds `building_height` but is sparse outside major cities), or `open_buildings` (Google Open Buildings v3 via GEE, needs `gee_project`; no heights, and covers Africa, South/Southeast Asia and Latin America & the Caribbean only — **not** Europe or North America)
+- **Buildings** — footprint polygons with a unique id column. Instead of a file, `data.buildings` also accepts `osm` (OpenStreetMap; `height` and `building:levels` tags are kept where mapped), `overture` (Overture Maps, global; `height` and `num_floors` are kept but sparse outside major cities), or `open_buildings` (Google Open Buildings v3 via GEE, needs `gee_project`; no heights, and covers Africa, South/Southeast Asia and Latin America & the Caribbean only — **not** Europe or North America). Visibility also needs building heights, which the `Heights` process attaches from global datasets when the footprints have none (see *Building heights* below)
 - **Trees** — canopy polygons with height and area attributes (a single file or a directory of tiles), or segment them from a CHM with the `Trees` process (see *Tree segmentation* below)
 - **Canopy for T30** — one of: a directory of CHM raster tiles (`.tif`, `chm_tiles_dir`); a GEE canopy-height asset (`canopy_height_ee_path`, needs `gee_project`); or the tree polygons above. See *Canopy cover source* below
 - **Parks** — green-space polygons, plus access points (can be the same file). Set `park_min_area_ha` (top-level config key) to ignore small green spaces — the WHO guideline behind the 300 rule uses ≥ 0.5–1 ha. Access points are only filtered along with their parks when `columns.park_access_ref_col` links them
@@ -141,7 +142,8 @@ greenpy run -c config.yaml -p T30
 greenpy run -c config.yaml -p T30_buildings --buffer 100
 greenpy run -c config.yaml -p T300
 greenpy run -c config.yaml -p Tree_count
-greenpy run -c config.yaml -p Visibility      # optional, needs building heights
+greenpy run -c config.yaml -p Heights         # building heights (Visibility builds them if missing)
+greenpy run -c config.yaml -p Visibility --buffer 50   # optional: trees in view
 greenpy run -c config.yaml -p Spectral        # optional, needs GEE
 greenpy run -c config.yaml -p Merge
 greenpy viz -c config.yaml                    # interactive map, see "Visualising results"
@@ -156,11 +158,11 @@ Useful options:
 - `--no-overwrite` — skip geo codes whose output CSV already exists (resume an interrupted run)
 - `--query_method sql|rdd` — Sedona join strategy for T3 (default `rdd`)
 - `--tree_area` / `--tree_height` — a tree counts in T3 and Visibility only if its canopy area (m²) and height (m) are *strictly greater* than these (defaults 10 and 3)
-- `--observer_mode facade|centroid` — where Visibility sightlines start on the building (default `facade`)
+- `--vis_engine raster|vector` — Visibility engine (default `visibility.engine`, i.e. `raster`; see *Tree visibility* below)
 - `--low_threshold` / `--high_threshold` — canopy-height band in metres for T30/T30_buildings binarisation (default 3–60)
 - `--gee_scale` — download resolution in metres for the T30/T30_buildings GEE canopy source (default `1.0`; raise to e.g. `10` for faster, lighter downloads over large regions — canopy is still thresholded at native resolution and each coarse pixel stores its canopy fraction, so cover stays unbiased)
 - `--composite max|median` — Spectral temporal composite (default `max`)
-- `--rule_t3_buffer`, `--rule_t30_buffer`, `--rule_distance` — how Merge evaluates the rule per building (see *Merge* below)
+- `--rule_t3_buffer`, `--rule_t3_metric`, `--rule_t30_buffer`, `--rule_distance` — how Merge evaluates the rule per building (see *Merge* below)
 
 ### Canopy cover source (T30, T30_buildings)
 
@@ -206,27 +208,80 @@ On an independent check — Cambridge City Council's 2024 inventory (20,779 tree
 
 Meta's smoother, whole-metre heights still split about one surveyed crown in two, so expect its T3 counts to run higher than LiDAR's (over Cambridge: 147k vs 120k T3-eligible trees with the tuned presets).
 
+### Building heights (Heights)
+
+Visibility needs a height for every building. `Heights` attaches one from an ordered chain of sources — for each building the first source with a valid height wins (`heights.min_height`–`heights.max_height`, default 2–300 m), and buildings no source covers get `heights.default_height` (6 m), flagged `height_source: default`, so they still block views:
+
+```yaml
+heights:
+  sources:                      # first valid height wins
+    - native                    # the footprints' own height (Overture, OSM, columns.building_height_col),
+                                #   else floor count x storey_height (num_floors, or options levels_col)
+    - gba                       # GlobalBuildingAtlas polygons
+    - {source: utglobus, city: bogota}
+    - {source: open_buildings_temporal, year: 2023}
+    - ghs_built_h               # coarse global fallback
+    - {source: file, path: /data/ndsm.tif, stat: median, name: lidar}
+  default_height: 6.0
+  storey_height: 3.0            # metres per floor, also Visibility's floor spacing
+  min_overlap: 0.3              # vector sources: share of the footprint they must cover
+```
+
+| Source | Dataset | Kind | Coverage | Licence |
+|---|---|---|---|---|
+| `native` | the footprints' own height / floor count | attribute | wherever mapped | that of the footprints |
+| `gba` | [GlobalBuildingAtlas](https://github.com/zhu-xlab/GlobalBuildingAtlas) polygons (GEE sat-io, 5° tiles) | vector | global | **CC BY-NC 4.0 — non-commercial only** |
+| `utglobus` | [UT-GLOBUS](https://www.nature.com/articles/s41597-024-03719-w) (GEE sat-io, one collection per city; `cambridge` is Cambridge, MA) | vector | ~1,100 cities | CC BY 4.0 |
+| `open_buildings_temporal` | [Open Buildings 2.5D Temporal](https://developers.google.com/earth-engine/datasets/catalog/GOOGLE_Research_open-buildings-temporal_v1), 2016–2023, fetched at 2 m | raster (~4 m) | Africa, S/SE Asia, Latin America & Caribbean | CC BY 4.0 |
+| `ghs_built_h` | [GHS-BUILT-H R2023A](https://developers.google.com/earth-engine/datasets/catalog/JRC_GHSL_P2023A_GHS_BUILT_H), average net height (2018) | raster (100 m) | global | CC BY 4.0 |
+| `file` | a local vector with a height column, or a raster file / directory (nDSM, GBA.Height 3 m) | either | — | — |
+
+Vector sources lend each footprint the area-weighted height of the source polygons covering it (so a block the source splits into several buildings still matches), when they cover at least `min_overlap` of it. Raster sources give the median (GHS: mean) of the pixels whose centre lies inside the footprint, or of every touched pixel for footprints smaller than a pixel; GHS cells are sampled on a 10 m grid so the mean approximates an area-weighted mean. Remote sources come through Google Earth Engine (`gee_project`) and are cached under the CHM cache directory (`data.chm_cache_dir`, else `$GREENPY_CACHE_DIR`): rasters as tiles aligned to a fixed grid, polygons as small lon/lat chunks, so reruns and neighbouring study areas reuse them. Each source's heights are cached per source (`database/heights/`), and the combined table is `database/building_heights_<key>.parquet`, keyed by the chain and the buildings cache — a new chain builds a new table rather than reusing a stale one. The run logs the share of buildings each source supplied.
+
+`scripts/evaluate_heights.py` compares the cached sources against reference heights. Against Verisk heights in Cambridge (45,719 buildings; `--levels_col premise_floor_count`):
+
+| Source | Coverage | MAE (m) | Bias (m) | Spearman |
+|---|---|---|---|---|
+| `ghs_built_h` | 95 % | 3.3 | −2.9 | 0.29 |
+| `gba` | 89 % | 4.1 | −3.9 | 0.38 |
+| floor count × 3 m | 99 % | 2.6 | −2.5 | 0.30 |
+
+Both global datasets run 3–4 m below Verisk, whose two-storey median of 8.9 m suggests it measures to the roof ridge, and rank buildings only weakly. Over Bogotá's 2.17 M Overture footprints the chain above took heights from GBA for 81 %, Open Buildings Temporal 10 %, GHS-BUILT-H 4 %, UT-GLOBUS 1 % and Overture 0.1 %, leaving 4 % at the default (16 min, 8 GB peak memory).
+
 ### Tree visibility (Visibility, optional)
 
-Where T3 counts trees *near* a building, `Visibility` checks whether they can actually be *seen* from it, using a 2.5D line-of-sight analysis: for every building–tree pair within `--buffer` metres, 9 sightlines are traced from three observer levels on the building (bottom z=0, middle z=H/2, top z=H) to three target levels on the tree (z=0, h/2, h). A sightline is blocked when another building footprint or tree canopy crosses it and that obstacle's height reaches the sightline's height at the crossing. A tree counts as visible from a level if at least one of its three target levels has a clear sightline.
+Where T3 counts trees *near* a building, `Visibility` counts the ones that can be *seen* from it. It looks from the windows: observer points every `visibility.facade_spacing` metres (5) around each footprint, `facade_offset` (0.5 m) outside the wall, at the eye height of every floor (`floor i: i × heights.storey_height + eye_height`, 1.5 m up; at least one floor). Walls shared with a neighbour (terraced houses) have no windows. It looks at each tree's treetop (`top_x`, `top_y` from `Trees`, else a point inside the crown) and `crown_points` (4) points on its crown at `crown_point_height` (2/3) of its height. A tree is visible when some window sees some target point over every obstacle — every building, the observer's own included, at its `Heights` height, and the vegetation — as flat-topped prisms on flat ground (grazing contact blocks). Inside the target tree's own crown only buildings block, so a tree never hides itself, nor do crowns overlapping it. The candidates are the trees T3 counts — centroid within `--buffer` m, above `--tree_area`/`--tree_height` — with the distance measured exactly, whereas T3's polygonal `ST_Buffer` trims up to ~2 % of the radius at the corners, so `candidate_trees` can exceed `tree_count_<b>m` by a tree or two (3 % of Bogotá's buildings at 50 m, 11 % at 100 m). Smaller trees still block views.
 
-Requirements and behaviour:
+Since visibility only improves with height, each building–tree pair reduces to the lowest eye height from which the tree is visible. Per building the output has `visible_trees` (seen from some floor), `visible_trees_ground` (from the ground floor), `candidate_trees` (T3's count), `n_floors`, `building_height` and `height_source`.
 
-- **Building heights are required** — set `columns.building_height_col` (metres) in the config, then delete `<output.base_dir>/database/buildings.parquet` if the cache already exists. Tree heights come from `tree_height_col` as usual.
-- **Complete height data is expected**: buildings or trees with a missing/invalid height are skipped entirely — as observers, targets *and* obstacles — with a warning, so gaps in height coverage bias the results. Not available with `buildings: osm` or `buildings: open_buildings` (those footprints carry no height); with `buildings: overture`, footprints without a height are dropped with a warning.
-- `--observer_mode facade` (default) starts each sightline at the nearest point of the building footprint boundary to the tree (a window facing it); `centroid` uses the building centroid for all sightlines.
-- Model assumptions: buildings are flat-topped prisms, trees are solid ground-to-crown prisms (a sightline under a canopy counts as blocked), terrain is flat, and grazing contact blocks.
-- The obstruction join grows quickly with `--buffer` in dense areas — prefer modest buffers (e.g. 50–100 m).
+Two engines share these definitions:
+
+- **`raster`** (default) — casts the sightlines over a surface model on a `visibility.resolution` grid (1 m): buildings burned at their heights plus the vegetation, which is the canopy height model when one is configured (`data.chm_tiles_dir` or `tree_segmentation.source`; Meta's CHM is cleared on roofs, `mask_chm_buildings`) and the tree crowns at their heights otherwise (`vegetation: auto|chm|crowns`). A numba kernel visits every pixel each sightline crosses, in parallel (`--parallel --n_workers N` sets the threads, default 16); buildings are processed in `tile_size` tiles (2 km). It needs no Spark. Edges are only as sharp as the grid: a sightline that clips a building corner by less than a pixel may be judged differently from exact geometry (set `resolution: 0.5` to tighten).
+- **`vector`** (`--vis_engine vector`) — the exact computation in Sedona SQL, intersecting every sightline with every footprint and crown polygon; a reference for small areas, writing `Visibility_vector/` so Merge never mixes engines. On the synthetic city both engines agree on 47 of 48 buildings (the other differs by one ground-floor tree, a sightline grazing a building corner); on three Cambridge output areas (312 buildings) they agree on `meets_3` for 99.7 % of buildings, with the raster engine seeing 2.5 % fewer trees on average, at ~1 s per area against ~50 s.
+
+Building heights come from the `Heights` chain (built on the first Visibility run when missing) and tree heights from `tree_height_col`. Terrain is flat, so hills (e.g. eastern Bogotá) are not modelled, and units at the edge of the study area see no obstacles beyond it.
+
+First results (raster engine, 16 threads):
+
+| Study area | Buffer | Run time | Candidates | Visible (ground floor) | Meets 3: proximity → visibility |
+|---|---|---|---|---|---|
+| Cambridge — 45,682 buildings, Verisk heights, VOM crowns | 50 m | 1.5 min | 16.9 | 11.0 (9.9) | 96.9 % → 92.2 % |
+| | 100 m | 1.8 min | 62.8 | 21.9 (17.1) | 99.5 % → 97.2 % |
+| Cambridge, GBA heights instead | 50 m | 1.6 min | 16.9 | 10.8 (10.3) | 96.9 % → 93.0 % |
+| Bogotá — 2.17 M buildings, global heights, Meta CHM | 50 m | 8 min | 4.7 | 1.2 (1.0) | 28.9 % → 10.7 % |
+| | 100 m | 9 min | 20.9 | 2.8 (2.1) | 60.7 % → 17.5 % |
+
+Peak memory was 0.6 GB (Cambridge) and 4.2 GB (Bogotá). Swapping Verisk for GBA heights in Cambridge changed `meets_3` for 1.6 % of buildings. Where vegetation comes from the CHM, every canopy pixel blocks — street trees hide each other — so a smaller share of the candidates is visible than with crown polygons.
 
 ### Merge and the 3-30-300 rule
 
 `Merge` accepts `--t3_buffers`, repeated once per buffer (e.g. `--t3_buffers 50 --t3_buffers 100`; default 10, 25, 50, 75 and 100), and combines whichever T3 buffer runs exist; Spectral, T30_buildings and Visibility outputs are included only if present. It aggregates to `--geo_level`, which for Merge defaults to the **second-finest** level of `columns.geo_levels` (the finest with a DGGS), reading sub-geo results at `--sub_geo_level` (default: finest).
 
-Per unit it reports means — `tree_count_<b>m`, `canopy_cover` (area-weighted), `park_distance_manhattan` (road network) and `park_distance_euclidean`, plus `building_canopy_cover_<b>m` and `visible_trees_<b>m` when available — and `total_trees`.
+Per unit it reports means — `tree_count_<b>m`, `canopy_cover` (area-weighted), `park_distance_manhattan` (road network) and `park_distance_euclidean`, plus `building_canopy_cover_<b>m`, `visible_trees_<b>m` and `visible_trees_ground_<b>m` when available — and `total_trees`.
 
 Because the rule is a test every home should pass, Merge also evaluates it **per building** and writes `database/T3_30_300_buildings.parquet` with `meets_3`, `meets_30`, `meets_300` and `meets_3_30_300`. The per-unit table gains `pct_meets_3`, `pct_meets_30`, `pct_meets_300` and `pct_meets_3_30_300` (% of buildings passing):
 
-- **3** — T3 count within `--rule_t3_buffer` metres (default `50`) is ≥ 3
+- **3** — at least 3 trees within `--rule_t3_buffer` metres (default `50`): counted by T3 (`--rule_t3_metric proximity`, the default) or visible from some floor (`--rule_t3_metric visibility`, needs Visibility at that buffer). Whenever both outputs exist the table keeps `meets_3_proximity` and `meets_3_visibility` (and `pct_` of each) beside `meets_3`, and the parquet's `greenpy_rule` metadata records which metric and columns the rule used
 - **30** — canopy cover of the building's sub-geo unit (the neighbourhood reading of the rule) is ≥ 30 %; with `--rule_t30_buffer N`, T30_buildings canopy within N metres of the building instead
 - **300** — distance to the nearest park is ≤ 300 m, straight-line by default (`--rule_distance euclidean`, as in the WHO guideline) or `network`
 
@@ -266,10 +321,11 @@ The server listens on `127.0.0.1` only. On a remote machine, forward the port (`
 ├── T30_buildings/ T30_buildings_<code>_<buffer>m.csv
 ├── T300/          T300_<code>.csv
 ├── Tree_count/    Tree_count_<code>.csv
-├── Visibility/    Visibility_<code>_<buffer>m.csv
+├── Visibility/    Visibility_<code>_<buffer>m.csv (Visibility_vector/ with --vis_engine vector)
 ├── Spectral/      Spectral_<code>.csv
 ├── T30_h3_9/, Tree_count_h3_9/   same, per grid cell (runs with --dggs h3 --dggs_resolution 9)
 └── database/      parquet cache + consolidated outputs
+    ├── building_heights_<key>.parquet ← one height per building (Heights; per-source caches in heights/)
     ├── T3_30_300_buildings.parquet  ← per-building 3-30-300 evaluation
     ├── T3_30_300_spectral.parquet   ← final merged table
     ├── h3_boundaries_res9.parquet   ← grid cells (+ T3_30_300_*_h3_9.parquet from a grid Merge)

@@ -65,10 +65,13 @@ def main(target: Path) -> None:
             y = random.uniform(miny + 15, maxy - 25)
             buildings.append({"bid": f"B{bid:04d}", "bh": round(random.uniform(4.0, 30.0), 1), "geometry": box(x, y, x + 10, y + 10)})
             bid += 1
-    # one building without height to exercise the Visibility skip-warning path
+    # one building without height: the Heights chain gives it the default height
     buildings[0]["bh"] = None
-    # Deterministic trio: 20 m observer, 8 m wall 10 m in front of its facade,
-    # 10 m tree 30 m from the facade. Visible from middle/top only.
+    # Deterministic trio: 20 m observer (6 floors), 8 m wall 10 m in front of its
+    # facade, 10 m tree 30 m from the facade. Its treetop needs an eye at ~7.05 m,
+    # so B_OBS sees it from floor 2 (eye 7.5 m) up but not from the ground floor:
+    # Visibility_D11_50m.csv has B_OBS visible_trees 1, visible_trees_ground 0,
+    # and B_WALL 1, 1 (both engines).
     buildings.append({"bid": "B_OBS", "bh": 20.0, "geometry": box(ORIGIN_X + 640, ORIGIN_Y + 695, ORIGIN_X + 650, ORIGIN_Y + 705)})
     buildings.append({"bid": "B_WALL", "bh": 8.0, "geometry": box(ORIGIN_X + 660, ORIGIN_Y + 680, ORIGIN_X + 664, ORIGIN_Y + 720)})
     # Straddles the D00/D10 district boundary (x = +400): must be owned by
