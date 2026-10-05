@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import geopandas as gpd
 import numpy as np
 import pandas as pd
 import shapely
@@ -25,10 +24,12 @@ class VisibilityInputs:
     @classmethod
     def load(cls, cfg: GreenPyConfig, overlay_path: Path | None = None) -> "VisibilityInputs":
         from ...heights.enrich import load_building_heights
+        from ...pipeline import all_buildings, ensure_context_buildings
 
         db = Path(cfg.output.base_dir) / "database"
-        buildings = gpd.read_parquet(db / "buildings.parquet", columns=["building_id", "geometry"])
-        buildings["building_id"] = buildings["building_id"].astype(str)
+        ensure_context_buildings(cfg)
+        # context-ring buildings have no overlay row: obstacles only, never observers
+        buildings = all_buildings(cfg, columns=["building_id", "geometry"])
         heights = load_building_heights(cfg).drop_duplicates("building_id").set_index("building_id")
         h = heights.reindex(buildings["building_id"])
         if h["building_height"].isna().any():

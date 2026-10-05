@@ -268,11 +268,12 @@ def run(
 def _run_heights(cfg, overwrite: bool) -> None:
     """Attach a height to every building from the heights.sources chain (no Spark needed)."""
     from .heights.enrich import build_building_heights
-    from .pipeline import _setup_parquet_files
+    from .pipeline import _setup_parquet_files, ensure_context_buildings
 
     db_dir = setup_output_dirs(cfg)["database"]
     if not (db_dir / "buildings.parquet").exists():
         _setup_parquet_files(cfg, db_dir)
+    ensure_context_buildings(cfg)
     build_building_heights(cfg, overwrite=overwrite)
 
 
@@ -316,8 +317,10 @@ def _run_visibility_raster(
 
 
 def _run_trees(cfg, geo_level: str, geo_code: str | None, n_workers: int, overwrite: bool) -> None:
-    """Segment CHM trees per geo_code into data.trees_dir (no Spark needed)."""
+    """Segment CHM trees per geo_code into data.trees_dir (no Spark needed), then the context ring
+    (`--geo_code context` segments only the ring)."""
     import geopandas as gpd
+    import pandas as pd
     from .optional.tree_segmentation import process_geo_code as process_trees, chm_source
 
     census_parquet = setup_output_dirs(cfg)["database"] / "census_boundaries.parquet"
@@ -326,7 +329,15 @@ def _run_trees(cfg, geo_level: str, geo_code: str | None, n_workers: int, overwr
     else:
         from .pipeline import _read_vector
         boundaries = _read_vector(cfg.data.census_boundaries).to_crs(cfg.crs)
-    codes = [geo_code] if geo_code else boundaries[geo_level].dropna().unique()
+    # "context" = the context_buffer ring around the study area, whose trees count for edge buildings
+    codes = [geo_code] if geo_code else list(boundaries[geo_level].dropna().unique()) + ["context"]
+    if "context" in codes and cfg.context_buffer > 0:
+        from .pipeline import context_ring
+        ring = context_ring(boundaries.to_crs(cfg.crs), cfg.context_buffer)
+        context = gpd.GeoDataFrame({geo_level: ["context"]}, geometry=[ring], crs=cfg.crs)
+        boundaries = pd.concat([boundaries.to_crs(cfg.crs), context], ignore_index=True)
+    elif "context" in codes:
+        codes.remove("context")
     logger.info(f"Trees: segmenting {len(codes)} regions from {chm_source(cfg)} with {n_workers} workers")
     failed = [
         code for code in tqdm(codes, desc="Regions")

@@ -290,6 +290,80 @@ def _setup_parquet_files(cfg: GreenPyConfig, db_dir: Path) -> None:
     logger.info("Parquet cache created successfully")
 
 
+def context_ring(census_gdf: gpd.GeoDataFrame, buffer: float):
+    """The band `buffer` metres wide around the study area (census union), in the census CRS."""
+    union = census_gdf.geometry.union_all()
+    return union.buffer(buffer).difference(union)
+
+
+def ensure_context_buildings(cfg: GreenPyConfig) -> Path | None:
+    """database/context_buildings.parquet: footprints in the context_buffer ring around the study area.
+
+    They have no census unit, so they are never observers or outputs — only
+    obstacles for Visibility (with heights from the Heights chain). Fetched
+    once from the remote building source (osm, overture, open_buildings);
+    file sources already keep every footprint in the file (extend it beyond
+    the study area to cover the ring). Returns None when there is no ring.
+    """
+    import json
+
+    import pyarrow.parquet as pq
+
+    from .config.schema import building_source
+
+    db_dir = Path(cfg.output.base_dir) / "database"
+    out = db_dir / "context_buildings.parquet"
+    source = building_source(cfg.data.buildings)
+    if cfg.context_buffer <= 0 or source is None:
+        return None
+    if out.exists():
+        meta = pq.read_schema(out).metadata or {}
+        if json.loads(meta.get(b"greenpy_context", b"{}")).get("buffer") == cfg.context_buffer:
+            return out
+
+    census_gdf = gpd.read_parquet(db_dir / "census_boundaries.parquet")
+    ring = gpd.GeoSeries([context_ring(census_gdf, cfg.context_buffer)], crs=census_gdf.crs).to_crs(4326).iloc[0]
+    logger.info(f"Fetching {source} buildings in the {cfg.context_buffer:g} m context ring around the study area")
+    try:
+        if source == "osm":
+            from . import osm
+            gdf = osm.fetch_osm_buildings(ring, cfg.osm.building_types, cfg.crs)
+        elif source == "overture":
+            from . import overture
+            gdf = overture.fetch_overture_buildings(ring, cfg.crs)
+        else:
+            from . import open_buildings
+            gdf = open_buildings.fetch_open_buildings(ring, cfg.open_buildings.confidence_threshold, cfg.crs, cfg.gee_project)
+    except ValueError as e:  # the fetchers refuse empty results
+        logger.warning(f"No context buildings: {e}")
+        gdf = gpd.GeoDataFrame({"building_id": []}, geometry=[], crs=cfg.crs)
+    inside = set(pd.read_parquet(db_dir / "buildings.parquet", columns=["building_id"])["building_id"].astype(str))
+    gdf = gdf[~gdf["building_id"].astype(str).isin(inside)].reset_index(drop=True)
+
+    # GeoParquet first, then the ring width added to its metadata (a changed buffer refetches)
+    tmp = out.with_name(out.name + ".part")
+    gdf.to_parquet(tmp, index=False)
+    table = pq.read_table(tmp)
+    meta = {**(table.schema.metadata or {}), b"greenpy_context": json.dumps({"buffer": cfg.context_buffer}).encode()}
+    pq.write_table(table.replace_schema_metadata(meta), tmp)
+    tmp.replace(out)
+    logger.info(f"Context ring: {len(gdf)} buildings -> {out.name}")
+    return out
+
+
+def all_buildings(cfg: GreenPyConfig, columns: list[str] | None = None) -> gpd.GeoDataFrame:
+    """Study-area buildings plus the context-ring buildings (if built), building_id as str."""
+    db_dir = Path(cfg.output.base_dir) / "database"
+    parts = [gpd.read_parquet(db_dir / "buildings.parquet", columns=columns)]
+    ctx = db_dir / "context_buildings.parquet"
+    if ctx.exists() and cfg.context_buffer > 0:
+        c = gpd.read_parquet(ctx)
+        parts.append(c[[k for k in (columns or c.columns) if k in c.columns]])
+    out = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry", crs=parts[0].crs)
+    out["building_id"] = out["building_id"].astype(str)
+    return out.drop_duplicates("building_id").reset_index(drop=True)
+
+
 def _build_overlay(buildings_gdf: gpd.GeoDataFrame, boundaries_gdf: gpd.GeoDataFrame, code_cols: list[str], out_path: Path) -> None:
     """Write a building_id → boundary-codes lookup parquet.
 

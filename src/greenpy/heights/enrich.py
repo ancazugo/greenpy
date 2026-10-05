@@ -30,9 +30,13 @@ def _db_dir(cfg: GreenPyConfig) -> Path:
 
 
 def buildings_fingerprint(cfg: GreenPyConfig) -> str:
-    """Identity of the buildings cache: size and modification time of database/buildings.parquet."""
-    st = (_db_dir(cfg) / "buildings.parquet").stat()
-    return f"{st.st_size}-{st.st_mtime_ns}"
+    """Identity of the footprints: size and modification time of database/buildings.parquet
+    and, when used, of the context-ring buildings."""
+    paths = [_db_dir(cfg) / "buildings.parquet"]
+    ctx = _db_dir(cfg) / "context_buildings.parquet"
+    if ctx.exists() and cfg.context_buffer > 0:
+        paths.append(ctx)
+    return "|".join(f"{p.stat().st_size}-{p.stat().st_mtime_ns}" for p in paths)
 
 
 def _key(payload) -> str:
@@ -133,8 +137,9 @@ def build_building_heights(cfg: GreenPyConfig, overwrite: bool = False) -> Path:
         logger.info(f"Heights: using {out.name}")
         return out
 
-    buildings = gpd.read_parquet(db_dir / "buildings.parquet")
-    buildings["building_id"] = buildings["building_id"].astype(str)
+    from ..pipeline import all_buildings
+
+    buildings = all_buildings(cfg)  # the study area plus the context ring (obstacles for Visibility)
     boundaries = gpd.read_parquet(db_dir / "census_boundaries.parquet")
     results = [
         (spec.label, source_heights(cfg, spec, buildings, boundaries, overwrite=overwrite))
