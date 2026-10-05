@@ -71,13 +71,13 @@ class VectorHeightSource(HeightSource):
     kind = "vector"
 
     @abstractmethod
-    def fetch(self, ctx: HeightContext) -> gpd.GeoDataFrame:
-        """Source polygons with a numeric `height` column covering the study area, in cfg.crs."""
+    def fetch(self, buildings: gpd.GeoDataFrame, ctx: HeightContext) -> gpd.GeoDataFrame:
+        """Source polygons with a numeric `height` column covering the footprints, in cfg.crs."""
 
     def heights(self, buildings: gpd.GeoDataFrame, ctx: HeightContext) -> pd.DataFrame:
         from .match import match_by_overlap
 
-        source = self.fetch(ctx)
+        source = self.fetch(buildings, ctx)
         return match_by_overlap(buildings, source, self.cfg.heights.min_overlap)
 
 
@@ -88,13 +88,13 @@ class RasterHeightSource(HeightSource):
     stat: str = "median"
 
     @abstractmethod
-    def rasters(self, ctx: HeightContext) -> list[Path]:
-        """Single-band height rasters (shared CRS and pixel size, NaN/nodata = no value) covering the study area."""
+    def rasters(self, buildings: gpd.GeoDataFrame, ctx: HeightContext) -> list[Path]:
+        """Single-band height rasters (shared CRS and pixel size, NaN/nodata = no value) covering the footprints."""
 
     def heights(self, buildings: gpd.GeoDataFrame, ctx: HeightContext) -> pd.DataFrame:
         from .match import zonal_heights
 
-        return zonal_heights(buildings, self.rasters(ctx), self.stat, ctx.cache_dir)
+        return zonal_heights(buildings, self.rasters(buildings, ctx), self.stat, ctx.cache_dir)
 
 
 def empty_result(buildings: gpd.GeoDataFrame) -> pd.DataFrame:
