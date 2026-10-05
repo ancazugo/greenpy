@@ -30,7 +30,8 @@ def match_by_overlap(
     several buildings (or merges into a larger one) is still matched. quality
     is the covered share of the footprint (capped at 1); footprints covered
     less than min_overlap get NaN. Duplicate source polygons (e.g. fetched by
-    two overlapping chunks) are dropped first.
+    two overlapping chunks) and polygons with a non-positive height are
+    dropped first.
     """
     out = empty_result(footprints)
     if source.empty or footprints.empty:
@@ -40,7 +41,8 @@ def match_by_overlap(
 
     src = source[["height", "geometry"]].copy()
     src["height"] = pd.to_numeric(src["height"], errors="coerce")
-    src = src[src["height"].notna() & src.geometry.notna() & ~src.geometry.is_empty]
+    # non-positive heights mean "unknown" in several datasets (e.g. UT-GLOBUS 0 m)
+    src = src[(src["height"] > 0) & src.geometry.notna() & ~src.geometry.is_empty]
     src = src.loc[~src.geometry.to_wkb().duplicated()]
     src_geoms = shapely.make_valid(src.geometry.values)
     src_h = src["height"].to_numpy(dtype=float)

@@ -101,10 +101,10 @@ def _download_tile(image, band: str, crs: str, transform: affine.Affine, tile_px
 
 
 def fetch_features(
-    collection_ids: list[str], bounds_4326: tuple, out_dir: Path, project: str | None,
+    collections: list[tuple[str, tuple]], out_dir: Path, project: str | None,
     properties: list[str], chunk_deg: float = 0.02, workers: int = 8,
 ) -> gpd.GeoDataFrame:
-    """Features of the given FeatureCollections inside bounds_4326, fetched per chunk_deg chunk.
+    """Features of each (FeatureCollection id, EPSG:4326 bounds) pair, fetched per chunk_deg chunk.
 
     Each (collection, chunk) is cached as parquet in out_dir; a feature
     straddling chunks comes back more than once (dedupe downstream). Returns
@@ -113,9 +113,9 @@ def fetch_features(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     jobs = []
-    for cid in collection_ids:
-        for ch in grid_chunks(bounds_4326, chunk_deg):
-            name = f"{cid.rstrip('/').split('/')[-1]}_{ch[0]:.4f}_{ch[1]:.4f}_{chunk_deg:g}.parquet"
+    for cid, bounds in collections:
+        for ch in grid_chunks(bounds, chunk_deg):
+            name = f"{cid.rstrip('/').split('/')[-1]}_{ch[0]:.4f}_{ch[1]:.4f}_{ch[2]:.4f}_{ch[3]:.4f}.parquet"
             jobs.append((cid, ch, out_dir / name))
     todo = [j for j in jobs if not j[2].exists()]
     if todo:
@@ -162,6 +162,25 @@ def _fetch_chunk(collection_id: str, bounds: tuple, properties: list[str], path:
     tmp = path.with_suffix(".parquet.part")
     gdf.to_parquet(tmp, index=False)
     tmp.replace(path)
+
+
+def list_asset_names(root: str, cache: Path, project: str | None) -> list[str]:
+    """Names of the assets directly under a GEE folder, cached as JSON at `cache`."""
+    if cache.exists():
+        return json.loads(cache.read_text())
+    import ee
+
+    ensure_gee(project)
+    names, token = [], None
+    while True:
+        page = ee.data.listAssets({"parent": root, **({"pageToken": token} if token else {})})
+        names += [a["name"].rstrip("/").split("/")[-1] for a in page.get("assets", [])]
+        token = page.get("nextPageToken")
+        if not token:
+            break
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(sorted(names)))
+    return sorted(names)
 
 
 def bounds_4326(buildings: gpd.GeoDataFrame, pad_deg: float = 0.001) -> tuple:
