@@ -15,10 +15,17 @@ from ..merge import RULE_MAX_DISTANCE, RULE_MIN_CANOPY, RULE_MIN_TREES, _buffers
 
 BUILDING_KEY = "building_id"
 # the three criteria first (store relies on RULE_FLAGS[:3]), then the combined rule and the
-# per-metric "3" flags Merge keeps beside meets_3
-RULE_FLAGS = ("meets_3", "meets_30", "meets_300", "meets_3_30_300", "meets_3_proximity", "meets_3_visibility")
-# per-building number of rule criteria met (0-3), derived in the store from the flags
+# per-metric flags Merge keeps beside meets_3 and meets_3_30_300 (see T3_METRICS)
+T3_METRICS = ("proximity", "visibility")
+RULE_FLAGS = (
+    "meets_3", "meets_30", "meets_300", "meets_3_30_300",
+    *(f"meets_3_{m}" for m in T3_METRICS), *(f"meets_3_30_300_{m}" for m in T3_METRICS),
+)
+# per-building number of rule criteria met (0-3), derived in the store from the flags;
+# criteria_met_<metric> counts the "3" of that metric instead of meets_3
 CRITERIA_MET = "criteria_met"
+# how the rule's "3" reads for each metric
+T3_METRIC_LABELS = {"proximity": "trees nearby", "visibility": "trees in view"}
 # columns that are bookkeeping, not metrics
 _SKIP_COLUMNS = {"total_pixels", "tree_pixels", "area", "geometry", "closest_park_access_id", "closest_park_site_id"}
 
@@ -35,6 +42,8 @@ class Metric:
     better: str | None = None  # "high", "low" or None
     # for a rule flag: the metric it tests, which the map shows as a gradient around the threshold
     gradient: str | None = None
+    # one-line explanation shown under the metric, when the label is not enough
+    note: str | None = None
 
 
 @dataclass
@@ -49,6 +58,12 @@ class Source:
     # geo codes the module ran over; rows missing within them mean 0, not unknown
     # (T3's rdd path omits tree-less buildings, Tree_count omits tree-less units)
     zero_fill: list[str] = field(default_factory=list)
+    # metrics computed from the file's columns: metric name -> SQL expression
+    expressions: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def metrics(self) -> list[str]:
+        return [*self.columns.values(), *self.expressions]
 
 
 @dataclass
@@ -115,10 +130,11 @@ def describe(name: str, module: str = "") -> Metric:
     base = name
     label = name.replace("_", " ")
     if base in RULE_FLAGS:
-        return Metric(name, _rule_label(base), module or "Rule", "boolean", better="high")
+        return Metric(name, _rule_label(base), module or "Rule", "boolean", better="high", note=_rule_note(base))
     if m := re.fullmatch(r"pct_(meets_\w+)", base):
         criterion = _rule_label(m.group(1)).removeprefix("Meets ")
-        return Metric(name, f"% of buildings meeting {criterion}", module or "Rule", "percent", better="high")
+        return Metric(name, f"% of buildings meeting {criterion}", module or "Rule", "percent", better="high",
+                      note=_rule_note(m.group(1)))
     if m := re.fullmatch(r"tree_count_(\d+)m", base):
         return Metric(name, f"Trees within {m.group(1)} m", module or "T3", "count", RULE_MIN_TREES, "high")
     if base in ("distance_euclidean", "park_distance_euclidean"):
@@ -133,15 +149,24 @@ def describe(name: str, module: str = "") -> Metric:
         return Metric(name, "Canopy cover of the building's unit (%)", module or "Rule", "percent", RULE_MIN_CANOPY, "high")
     if base == CRITERIA_MET:
         return Metric(name, "3-30-300 criteria met (of 3)", module or "Rule", "count", 3, "high")
+    if m := re.fullmatch(rf"{CRITERIA_MET}_({'|'.join(T3_METRICS)})", base):
+        return Metric(name, f"3-30-300 criteria met (of 3), 3 = {T3_METRIC_LABELS[m.group(1)]}", module or "Rule",
+                      "count", 3, "high")
     if m := re.fullmatch(r"building_canopy_cover_(\d+)m", base):
         return Metric(name, f"Canopy cover within {m.group(1)} m (%)", module or "T30_buildings", "percent", RULE_MIN_CANOPY, "high")
     if m := re.fullmatch(r"visible_trees_(\d+)m", base):
-        return Metric(name, f"Trees visible within {m.group(1)} m", module or "Visibility", "count", RULE_MIN_TREES, "high")
+        return Metric(name, f"Trees visible within {m.group(1)} m", module or "Visibility", "count", RULE_MIN_TREES, "high",
+                      note=VISIBILITY_NOTE)
     if m := re.fullmatch(r"visible_trees_ground_(\d+)m", base):
         return Metric(name, f"Trees visible from the ground floor within {m.group(1)} m", module or "Visibility",
-                      "count", RULE_MIN_TREES, "high")
+                      "count", RULE_MIN_TREES, "high", note="As trees visible, but from ground-floor windows only.")
+    if m := re.fullmatch(r"share_visible_(\d+)m", base):
+        return Metric(name, f"Trees within {m.group(1)} m that are in view (%)", module or "Visibility", "percent",
+                      better="high", note="Of the trees within the buffer, the share some window sees; the rest are "
+                      "hidden by buildings, other trees or terrain. Areas: over all building-tree pairs.")
     if base == "building_height":
-        return Metric(name, "Building height (m)", module or "Heights", "value")
+        return Metric(name, "Building height (m)", module or "Heights", "value",
+                      note="From the heights chain (first source with a valid height); used for Visibility's floors.")
     if base == "n_buildings":
         return Metric(name, "Buildings in unit", module or "Other", "count")
     if base in ("total_trees", "tree_count"):
@@ -155,9 +180,23 @@ def _rule_label(flag: str) -> str:
         "meets_30": "Meets 30 (canopy)",
         "meets_300": "Meets 300 (park)",
         "meets_3_30_300": "Meets 3-30-300",
-        "meets_3_proximity": "Meets 3 (trees nearby)",
-        "meets_3_visibility": "Meets 3 (trees in view)",
+        **{f"meets_3_{m}": f"Meets 3 ({lbl})" for m, lbl in T3_METRIC_LABELS.items()},
+        **{f"meets_3_30_300_{m}": f"Meets 3-30-300 with 3 = {lbl}" for m, lbl in T3_METRIC_LABELS.items()},
     }[flag]
+
+
+VISIBILITY_NOTE = (
+    "Trees within the buffer whose crown is in a clear line of sight from a window on some floor; "
+    "buildings, other trees and terrain block the view."
+)
+
+
+def _rule_note(flag: str) -> str | None:
+    if flag.endswith("_visibility"):
+        return "The rule's 3 counted as trees in view from some window (Visibility), not trees nearby."
+    if flag.endswith("_proximity"):
+        return "The rule's 3 counted as trees within the buffer (T3), whether in view or not."
+    return None
 
 
 def _expand(path: str) -> list[Path]:
@@ -221,11 +260,17 @@ def _building_sources(cfg: GreenPyConfig, base: Path, db: Path) -> list[Source]:
 
     buffers = sorted(set(_buffers_in(db, "Visibility", "parquet")) | set(_buffers_in(base / "Visibility", "Visibility", "csv")))
     for b in buffers:
-        sources.append(_source(
+        src = _source(
             db, base / "Visibility", f"Visibility_{b}m.parquet", f"*_{b}m.csv",
             BUILDING_KEY, {"visible_trees": f"visible_trees_{b}m", "visible_trees_ground": f"visible_trees_ground_{b}m"},
             "Visibility",
-        ))
+        )
+        if src and "candidate_trees" in _columns(src.path, src.fmt):
+            # how much obstruction costs: of the trees within the buffer, the share in view (none nearby -> null)
+            src.expressions[f"share_visible_{b}m"] = (
+                "round(100.0 * visible_trees / NULLIF(candidate_trees, 0), 1)"
+            )
+        sources.append(src)
 
     heights = _heights_parquet(cfg, db)
     if heights is not None:
@@ -351,6 +396,9 @@ def _rule_gradients(db: Path) -> dict[str, str]:
         out["meets_300"] = d
     if "meets_3_30_300" in cols:
         out["meets_3_30_300"] = CRITERIA_MET
+    for metric in T3_METRICS:
+        if f"meets_3_30_300_{metric}" in cols:
+            out[f"meets_3_30_300_{metric}"] = f"{CRITERIA_MET}_{metric}"
     return out
 
 

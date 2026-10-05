@@ -17,7 +17,7 @@ from pathlib import Path
 import duckdb
 from loguru import logger
 
-from .catalog import BUILDING_KEY, CRITERIA_MET, RULE_FLAGS, Catalog, Source, UnitLayer, describe
+from .catalog import BUILDING_KEY, CRITERIA_MET, RULE_FLAGS, T3_METRICS, Catalog, Source, UnitLayer, describe
 
 STORE_VERSION = 8
 # building columns holding a census unit's name, e.g. "name:ADM3_code"
@@ -99,13 +99,16 @@ def _metric_views(con: duckdb.DuckDBPyConnection, sources: list[Source], prefix:
     views = []
     for i, src in enumerate(sources):
         name = f"{prefix}_{i}"
-        cols = ", ".join(f"any_value({_ident(c)}) AS {_ident(m)}" for c, m in src.columns.items())
+        cols = ", ".join(
+            [f"any_value({_ident(c)}) AS {_ident(m)}" for c, m in src.columns.items()]
+            + [f"any_value({expr}) AS {_ident(m)}" for m, expr in src.expressions.items()]
+        )
         con.execute(f"""
             CREATE TEMP TABLE {name} AS
             SELECT CAST({_ident(src.key)} AS VARCHAR) AS k, {cols}
             FROM {_reader(src)} WHERE {_ident(src.key)} IS NOT NULL GROUP BY 1
         """)
-        views.append((name, list(src.columns.values())))
+        views.append((name, src.metrics))
     return views
 
 
@@ -168,12 +171,14 @@ def _build_buildings(con: duckdb.DuckDBPyConnection, catalog: Catalog) -> list[s
             f"SELECT CAST({BUILDING_KEY} AS VARCHAR) AS id, * FROM read_parquet({_sql_str(overlay)})", levels,
         )
     metrics = [m for _, cols in views for m in cols]
-    criteria = [f for f in RULE_FLAGS[:3] if f in metrics]
-    if len(criteria) == 3:
-        # how many of 3 / 30 / 300 a building meets, so the combined rule can be shown as a gradient
-        con.execute(f"ALTER TABLE buildings ADD COLUMN {CRITERIA_MET} INTEGER")
-        con.execute(f"UPDATE buildings SET {CRITERIA_MET} = " + " + ".join(f"CAST({_ident(f)} AS INTEGER)" for f in criteria))
-        metrics.append(CRITERIA_MET)
+    # how many of 3 / 30 / 300 a building meets, so the combined rule can be shown as a gradient;
+    # once for the rule's own "3" and once per "3" metric Merge evaluated
+    for col, three in [(CRITERIA_MET, "meets_3"), *((f"{CRITERIA_MET}_{m}", f"meets_3_{m}") for m in T3_METRICS)]:
+        criteria = [three, "meets_30", "meets_300"]
+        if all(f in metrics for f in criteria):
+            con.execute(f"ALTER TABLE buildings ADD COLUMN {col} INTEGER")
+            con.execute(f"UPDATE buildings SET {col} = " + " + ".join(f"CAST({_ident(f)} AS INTEGER)" for f in criteria))
+            metrics.append(col)
     _hilbert_order(con, "buildings")
     con.execute("CREATE INDEX buildings_id ON buildings (id)")
     return metrics
@@ -375,6 +380,8 @@ def study_summary(con: duckdb.DuckDBPyConnection, catalog: Catalog, layers: dict
         "trees": trees["count"] if trees else None,
         "parks": parks,
         "rule": {},
+        # which "3" Merge's meets_3 used (proximity / visibility), when its metadata says
+        "t3_metric": _rule_t3_metric(catalog),
         "medians": [],
         "canopy_cover": None,
     }
@@ -388,13 +395,24 @@ def study_summary(con: duckdb.DuckDBPyConnection, catalog: Catalog, layers: dict
         next((m for m in building_metrics if m.startswith("building_canopy_cover_")), None),
         "distance_euclidean" if "distance_euclidean" in building_metrics else None,
     ]
-    for metric in (t if t in building_metrics else f for t, f in zip(tested, fallbacks)):
+    medians = [t if t in building_metrics else f for t, f in zip(tested, fallbacks)]
+    # both "3" metrics when Merge kept both: trees nearby and trees in view
+    medians[1:1] = [catalog.rule_gradients.get(f"meets_3_{m}") for m in T3_METRICS]
+    for metric in dict.fromkeys(m for m in medians if m in building_metrics):
         if metric:
             median = con.execute(f"SELECT median({_ident(metric)}) FROM buildings").fetchone()[0]
             summary["medians"].append(asdict(describe(metric)) | {"value": median})
 
     summary["canopy_cover"] = _study_canopy(con, catalog)
     return summary
+
+
+def _rule_t3_metric(catalog: Catalog) -> str | None:
+    from ..merge import read_rule_metadata
+
+    rule = catalog.base_dir / "database" / "T3_30_300_buildings.parquet"
+    meta = read_rule_metadata(rule) if rule.exists() else None
+    return (meta or {}).get("t3_metric")
 
 
 def _study_canopy(con: duckdb.DuckDBPyConnection, catalog: Catalog) -> dict | None:
@@ -473,11 +491,11 @@ def build_store(catalog: Catalog, path: Path, include_trees: bool = True) -> Non
                 con.execute("INSERT INTO metric_stats VALUES (?, ?, ?)", [name, m, json.dumps(metric_stats(con, info["table"], m))])
 
         # per layer: Merge's unit table reuses building metric names (tree_count_50m, ...)
-        module_of = {"buildings": {m: s.module for s in catalog.building_sources for m in s.columns.values()}}
+        module_of = {"buildings": {m: s.module for s in catalog.building_sources for m in s.metrics}}
         for layer in catalog.unit_layers:
             module_of[layer.name] = {}
             for s in layer.sources:  # the first source of a metric (Merge's table) names its module
-                for m in s.columns.values():
+                for m in s.metrics:
                     module_of[layer.name].setdefault(m, s.module)
         meta = {
             "fingerprint": fingerprint(catalog, include_trees),

@@ -108,6 +108,7 @@ select:disabled { color: var(--ink-2); border-color: var(--rule); }
 .hist .axis { stroke: var(--ink); }
 .legend-foot { display: flex; justify-content: space-between; gap: 8px; color: var(--ink-2); font-size: 12px; margin-top: 4px; }
 .legend-foot a { color: var(--ink); cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.metric-note { margin: 6px 0 0; color: var(--ink-2); font-size: 12px; }
 .note { font-style: italic; color: var(--ink-2); font-size: 12px; margin: 6px 0 0; }
 .cats { display: grid; gap: 3px; margin: 4px 0; }
 .cat { display: grid; grid-template-columns: 14px 1fr auto; gap: 8px; align-items: center; cursor: pointer; }
@@ -140,7 +141,11 @@ select:disabled { color: var(--ink-2); border-color: var(--rule); }
 .summary-body .method { margin: 4px 0 0; color: var(--ink-2); font-size: 11px; font-style: italic; }
 .rule-head { display: flex; justify-content: space-between; align-items: baseline; margin-top: 10px; }
 .rule-head strong { font: 400 22px/1 var(--serif); }
-.bars { display: grid; grid-template-columns: 76px 1fr 46px; gap: 4px 8px; align-items: center; margin-top: 6px; font-size: 12px; }
+.rule-title { margin-top: 10px; color: var(--ink-2); font-size: 12px; }
+.rule-title + .rule-head { margin-top: 4px; }
+.rule-head.alt { margin-top: 4px; color: var(--ink-2); }
+.rule-head.alt strong { font-size: 17px; }
+.bars { display: grid; grid-template-columns: 92px 1fr 46px; gap: 4px 8px; align-items: center; margin-top: 6px; font-size: 12px; }
 .bar { height: 8px; background: var(--paper-2); border: 1px solid var(--rule); position: relative; }
 .bar i { position: absolute; inset: 0 auto 0 0; background: var(--ink); }
 .bars .pct { text-align: right; }

@@ -219,3 +219,49 @@ def test_stats_carry_percentiles(store):
     s = json.loads(ts.stats("buildings", "distance_euclidean"))
     assert len(s["pcts"]) == 101 and s["pcts"][0] == 80.0 and s["pcts"][-1] == 350.0
     assert s["pcts"] == sorted(s["pcts"])
+
+
+def test_visibility_metrics_and_both_rules(tmp_path):
+    """Visibility outputs and a Merge rule table with both "3" metrics."""
+    import pandas as pd
+
+    from greenpy.merge import write_rule_parquet
+
+    make_outputs(tmp_path, merged=True)
+    (tmp_path / "Visibility").mkdir()
+    pd.DataFrame({
+        "building_id": [0, 1, 2], "visible_trees": [1, 3, 2], "visible_trees_ground": [0, 1, 2],
+        "candidate_trees": [2, 3, 0], "n_floors": [2, 1, 4], "TRACT": ["T0", "T0", "T1"],
+    }).to_csv(tmp_path / "Visibility" / "Visibility_D0_50m.csv", index=False)
+    flags = {
+        "meets_3": [False, True, True], "meets_30": [False, False, True], "meets_300": [True, False, True],
+        "meets_3_30_300": [False, False, True], "meets_3_proximity": [False, True, True],
+        "meets_3_visibility": [False, True, False], "meets_3_30_300_proximity": [False, False, True],
+        "meets_3_30_300_visibility": [False, False, False],
+    }
+    rule = pd.DataFrame({
+        "building_id": [0, 1, 2], "DIST": ["D0"] * 3, "TRACT": ["T0", "T0", "T1"], "tree_count_50m": [2, 3, 9],
+        "visible_trees_50m": [1, 3, 2], "distance_euclidean": [100.0, 350.0, 80.0], "canopy_cover": [12.5, 12.5, 41.0],
+        **flags,
+    }).astype({f: "boolean" for f in flags})
+    write_rule_parquet(rule, tmp_path / "database" / "T3_30_300_buildings.parquet",
+                       {"t3_metric": "proximity", "t3_col": "tree_count_50m"})
+    ts = _open(ensure_store(build_catalog(make_config(tmp_path))))
+    try:
+        bm = {m["name"]: m for m in ts.meta["layers"]["buildings"]["metrics"]}
+        assert bm["share_visible_50m"]["module"] == "Visibility" and bm["share_visible_50m"]["note"]
+        # B2 has no tree within the buffer: no share, not 0 %
+        assert [ts.feature("buildings", i)["share_visible_50m"] for i in "012"] == [50.0, 100.0, None]
+        assert bm["meets_3_30_300_visibility"]["gradient"] == "criteria_met_visibility"
+        assert bm["meets_3_visibility"]["gradient"] == "visible_trees_50m"
+        assert [ts.feature("buildings", i)["criteria_met_visibility"] for i in "012"] == [1, 1, 2]
+        assert [ts.feature("buildings", i)["criteria_met_proximity"] for i in "012"] == [1, 1, 3]
+        tract = {m["name"] for m in ts.meta["layers"]["TRACT"]["metrics"]}
+        assert {"mean_share_visible_50m", "pct_meets_3_30_300_visibility", "mean_visible_trees_50m"} <= tract
+        s = ts.meta["summary"]
+        assert s["t3_metric"] == "proximity"
+        assert s["rule"]["meets_3_30_300_proximity"]["true"] == 1 and s["rule"]["meets_3_30_300_visibility"]["true"] == 0
+        medians = [m["name"] for m in s["medians"]]
+        assert medians[:2] == ["tree_count_50m", "visible_trees_50m"]
+    finally:
+        ts.close()

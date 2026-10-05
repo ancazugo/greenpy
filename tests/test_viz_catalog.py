@@ -145,3 +145,13 @@ def test_rule_gradients_follow_merge_metadata(tmp_path):
     # tables written before the metadata existed fall back to the T3 column
     df.to_parquet(tmp_path / "T3_30_300_buildings.parquet")
     assert _rule_gradients(tmp_path)["meets_3"] == "tree_count_50m"
+
+
+def test_per_metric_rule_labels():
+    assert describe("meets_3_30_300_visibility").label == "Meets 3-30-300 with 3 = trees in view"
+    assert describe("pct_meets_3_30_300_proximity").label == "% of buildings meeting 3-30-300 with 3 = trees nearby"
+    assert describe("pct_meets_3_visibility").note and describe("meets_3").note is None
+    m = describe("share_visible_100m")
+    assert (m.kind, m.module, m.threshold, m.better) == ("percent", "Visibility", None, "high")
+    assert describe("mean_share_visible_50m").label.startswith("Mean trees within 50 m")
+    assert describe("criteria_met_visibility").threshold == 3

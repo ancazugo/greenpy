@@ -62,5 +62,10 @@ def test_evaluate_rule_keeps_both_tree_metrics():
     assert out["meets_3"].tolist() == [False, False, True, False, True]  # visibility drives the rule
     assert out["meets_3_proximity"].tolist() == [True, False, True, False, True]
     assert out["meets_3_visibility"].tolist() == out["meets_3"].tolist()
+    # the combined rule under each "3"; e's canopy is unknown, so both are null there
+    assert out["meets_3_30_300_visibility"].tolist()[:4] == out["meets_3_30_300"].tolist()[:4] == [False, False, False, False]
+    assert out["meets_3_30_300_proximity"].tolist()[:4] == [True, False, False, False]
+    assert out["meets_3_30_300_proximity"].isna().tolist() == [False] * 4 + [True]
     summary = summarise_rule(out, "LAD").set_index("LAD")
     assert summary.loc["L1", "pct_meets_3_proximity"] == 66.67 and summary.loc["L1", "pct_meets_3_visibility"] == 33.33
+    assert summary.loc["L1", "pct_meets_3_30_300_proximity"] == 33.33 and summary.loc["L1", "pct_meets_3_30_300_visibility"] == 0.0

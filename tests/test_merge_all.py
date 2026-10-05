@@ -88,7 +88,10 @@ def test_compliance_rule_t3_metric(spark, tmp_path, metric, expected):
     assert meta["t3_metric"] == metric
     assert meta["t3_col"] == ("visible_trees_50m" if metric == "visibility" else "tree_count_50m")
     agg = spark.table("compliance_agg").toPandas()
-    assert {"pct_meets_3_proximity", "pct_meets_3_visibility"} <= set(agg.columns)
+    assert {"pct_meets_3_proximity", "pct_meets_3_visibility", "pct_meets_3_30_300_proximity",
+            "pct_meets_3_30_300_visibility"} <= set(agg.columns)
+    assert out["meets_3_30_300_proximity"].tolist() == [True, True, False]  # unit canopy 40 %, parks at 100 m
+    assert out["meets_3_30_300_visibility"].tolist() == [True, False, False]
 
 
 def test_compliance_visibility_requires_output(spark, tmp_path):
@@ -98,3 +101,17 @@ def test_compliance_visibility_requires_output(spark, tmp_path):
     with pytest.raises(FileNotFoundError, match="Visibility"):
         compute_compliance(spark, _cfg(tmp_path), "unit", "unit", [50], [], rule_t3_buffer=50,
                            rule_t3_metric="visibility", visibility_buffers=[])
+
+
+def test_aggregate_visibility_share_in_view(spark):
+    from greenpy.merge import aggregate_visibility
+
+    _view(spark, "boundaries_buildings_overlay", pd.DataFrame({"building_id": ["a", "b", "c"], "unit": ["U", "U", "V"]}))
+    _view(spark, "visibility_50m", pd.DataFrame({
+        "building_id": ["a", "b", "c"], "visible_trees": [4, 1, 0], "visible_trees_ground": [2, 0, 0],
+        "candidate_trees": [5, 5, 0],
+    }))
+    out = aggregate_visibility(spark, "unit", [50]).toPandas().set_index("unit")
+    # pairs, not buildings: (4 + 1) of (5 + 5) trees nearby are in view; V has no nearby trees
+    assert out.loc["U", "share_visible_50m"] == 50.0 and pd.isna(out.loc["V", "share_visible_50m"])
+    assert out.loc["U", "visible_trees_50m"] == 2.5

@@ -32,7 +32,9 @@ const NODATA = "#c9c4b8", FILTERED = "#e4dfd3";
 const PARK = "#7b3294", PARK_LINE = "#542788", GRID_LINE = "#3f4a63";
 const GRID_RE = /^(h3|s2|geohash|a5|rhealpix)_\d+$/;
 const INK = "#1d1d1b", PAPER = "#f4f1ea";
-const MODULE_ORDER = ["Rule", "T3", "T30", "T30_buildings", "T300", "Visibility", "Tree_count", "Merge", "Spectral", "Other"];
+const MODULE_ORDER = ["Rule", "T3", "Visibility", "T30", "T30_buildings", "T300", "Heights", "Tree_count", "Merge", "Spectral", "Other"];
+// how the rule's "3" reads for each metric Merge can test (--rule_t3_metric)
+const T3_METRICS = { proximity: "trees nearby", visibility: "trees in view" };
 
 const BASEMAPS = {
   paper: { label: "None (paper)", style: null },
@@ -517,6 +519,8 @@ function renderPanel(t) {
   const s = state[t];
   const { base, flag, info } = drawn(t);
   if (!base) return;
+  // what the metric measures, when its name alone does not say (e.g. visibility)
+  if (base.note) panel.append(el("p", { class: "metric-note" }, base.note));
 
   if (base.kind === "boolean" && base.gradient) {
     const seg = el("div", { class: "seg" });
@@ -720,8 +724,15 @@ function renderSummary() {
   for (const m of sm.medians) figures.push([`Median ${m.label[0].toLowerCase()}${m.label.slice(1)}`, fmt(m.value, m)]);
 
   const share = st => (st && st.true + st.false ? (100 * st.true) / (st.true + st.false) : null);
-  const all = share(sm.rule.meets_3_30_300);
-  const crit = [["3", "meets_3", "trees"], ["30", "meets_30", "canopy"], ["300", "meets_300", "park"]].filter(([, f]) => sm.rule[f]);
+  // with both "3" metrics, the rule is shown under each (the one Merge's meets_3 used first)
+  const metrics = Object.keys(T3_METRICS).filter(m => sm.rule[`meets_3_${m}`]);
+  const both = metrics.length === 2;
+  if (both && sm.t3_metric === "visibility") metrics.reverse();
+  const heads = both && metrics.every(m => sm.rule[`meets_3_30_300_${m}`])
+    ? metrics.map(m => [`3-30-300, 3 = ${T3_METRICS[m]}`, sm.rule[`meets_3_30_300_${m}`], m === sm.t3_metric])
+    : [["Buildings meeting 3-30-300", sm.rule.meets_3_30_300, true]];
+  const threes = both ? metrics.map(m => ["3", `meets_3_${m}`, T3_METRICS[m]]) : [["3", "meets_3", "trees"]];
+  const crit = [...threes, ["30", "meets_30", "canopy"], ["300", "meets_300", "park"]].filter(([, f]) => sm.rule[f]);
 
   box.innerHTML = `<h2><span>Study area</span><button type="button" class="toggle" id="summary-toggle" aria-expanded="${!collapsed}"
     title="${collapsed ? "Expand" : "Collapse"} the summary" aria-label="${collapsed ? "Expand" : "Collapse"} the summary">${collapsed ? "+" : "−"}</button></h2>
@@ -740,9 +751,14 @@ function renderSummary() {
   }
   if (crit.length) {
     const r = box.querySelector(".rule");
-    const head = el("div", { class: "rule-head" });
-    head.append(el("span", {}, "Buildings meeting 3-30-300"), el("strong", {}, all === null ? "—" : `${all.toFixed(1)}%`));
-    r.append(head);
+    if (heads.length > 1) r.append(el("div", { class: "rule-title" }, "Buildings meeting the rule"));
+    for (const [label, st, main] of heads) {
+      const pct = share(st);
+      const head = el("div", { class: main ? "rule-head" : "rule-head alt" });
+      if (heads.length > 1 && main) head.title = "The rule's \"3\" in Merge (--rule_t3_metric)";
+      head.append(el("span", {}, label), el("strong", {}, pct === null ? "—" : `${pct.toFixed(1)}%`));
+      r.append(head);
+    }
     const bars = el("div", { class: "bars" });
     for (const [num, f, what] of crit) {
       const pct = share(sm.rule[f]);

@@ -195,23 +195,27 @@ def aggregate_tree_count(sedona: SparkSession, geo_level: str, sub_geo_level: st
 
 def _aggregate_building_buffers(
     sedona: SparkSession, geo_level: str, buffers: list[int], view_prefix: str,
-    columns: list[tuple[str, str]], agg_view: str,
+    columns: list[tuple[str, str]], agg_view: str, ratios: list[tuple[str, str, str]] = (),
 ) -> DataFrame | None:
     """Average per-building metrics up to geo_level via the buildings overlay, one column per metric and buffer.
 
-    columns holds (value_col, out_prefix) pairs; value columns missing from a
-    buffer's table are skipped. Output columns are `<out_prefix>_<buffer>m`.
-    Returns None when no buffer exists.
+    columns holds (value_col, out_prefix) pairs; ratios holds (numerator_col,
+    denominator_col, out_prefix) triples, aggregated as 100 * SUM / SUM (null
+    where the denominator sums to 0). Columns missing from a buffer's table are
+    skipped. Output columns are `<out_prefix>_<buffer>m`. Returns None when no
+    buffer exists.
     """
     if not buffers:
         return None
 
     def select(buffer: int) -> str:
         present = set(sedona.table(f"{view_prefix}_{buffer}m").columns)
-        return ", ".join(
-            f"ROUND(AVG(t.{value_col}), 2) AS {out_prefix}_{buffer}m"
-            for value_col, out_prefix in columns if value_col in present
-        )
+        return ", ".join([
+            *(f"ROUND(AVG(t.{value_col}), 2) AS {out_prefix}_{buffer}m"
+              for value_col, out_prefix in columns if value_col in present),
+            *(f"ROUND(100 * SUM(t.{num}) / NULLIF(SUM(t.{den}), 0), 2) AS {out_prefix}_{buffer}m"
+              for num, den, out_prefix in ratios if {num, den} <= present),
+        ])
 
     per_buffer = [
         sedona.sql(f"""
@@ -244,10 +248,12 @@ def aggregate_t30_buildings(sedona: SparkSession, geo_level: str, buffers: list[
 
 def aggregate_visibility(sedona: SparkSession, geo_level: str, buffers: list[int]) -> DataFrame | None:
     """Average per-building visible tree counts up to geo_level (`visible_trees_<buffer>m`, from any
-    floor, and `visible_trees_ground_<buffer>m`, from the ground floor)."""
+    floor, and `visible_trees_ground_<buffer>m`, from the ground floor), and `share_visible_<buffer>m`:
+    the % of the unit's building-tree pairs within the buffer where the tree is in view."""
     return _aggregate_building_buffers(
         sedona, geo_level, buffers, "visibility",
         [("visible_trees", "visible_trees"), ("visible_trees_ground", "visible_trees_ground")], "visibility_agg",
+        ratios=[("visible_trees", "candidate_trees", "share_visible")],
     )
 
 
@@ -267,8 +273,9 @@ def evaluate_rule(
     park distance <= 300 m. A missing input (or tree_col/canopy_col None)
     leaves that criterion null; meets_3_30_300 is null unless all three are known.
     tree_cols_by_metric (e.g. {"proximity": "tree_count_50m", "visibility":
-    "visible_trees_50m"}) adds a meets_3_<metric> flag per tree count, so the
-    metrics not chosen for meets_3 stay comparable.
+    "visible_trees_50m"}) adds a meets_3_<metric> flag per tree count, and the
+    combined meets_3_30_300_<metric> it gives, so the metrics not chosen for
+    meets_3 stay comparable.
     """
     df = buildings_df.copy()
 
@@ -283,15 +290,22 @@ def evaluate_rule(
         df[f"meets_3_{metric}"] = _flag(col, lambda v: v >= RULE_MIN_TREES)
     df["meets_30"] = _flag(canopy_col, lambda v: v >= RULE_MIN_CANOPY)
     df["meets_300"] = _flag(distance_col, lambda v: v <= RULE_MAX_DISTANCE)
-    # Kleene AND would make "False & NA" False; the combined rule needs all three known
-    parts = df[["meets_3", "meets_30", "meets_300"]]
-    df["meets_3_30_300"] = parts.all(axis=1).astype("boolean").mask(parts.isna().any(axis=1))
+
+    def _all_known(cols: list[str]) -> pd.Series:
+        # Kleene AND would make "False & NA" False; the combined rule needs all three known
+        parts = df[cols]
+        return parts.all(axis=1).astype("boolean").mask(parts.isna().any(axis=1))
+
+    df["meets_3_30_300"] = _all_known(["meets_3", "meets_30", "meets_300"])
+    for metric in tree_cols_by_metric or {}:
+        df[f"meets_3_30_300_{metric}"] = _all_known([f"meets_3_{metric}", "meets_30", "meets_300"])
     return df
 
 
 def summarise_rule(evaluated_df: pd.DataFrame, geo_level: str) -> pd.DataFrame:
     """Per geo_level unit, % of buildings meeting each criterion (over buildings where it is known)."""
     flags = ["meets_3", "meets_30", "meets_300", "meets_3_30_300"]
+    # per-metric flags: meets_3_<metric> and meets_3_30_300_<metric>
     flags += [c for c in evaluated_df.columns if c.startswith("meets_3_") and c != "meets_3_30_300"]
     numeric = evaluated_df[[geo_level]].copy()
     for f in flags:
@@ -612,7 +626,8 @@ def process_data(
         f"building_canopy_cover_{b}m" for b in tables["t30_buildings_buffers"]
     ] + ["park_distance_manhattan", "park_distance_euclidean", "water_distance",
          "pct_meets_3", "pct_meets_30", "pct_meets_300", "pct_meets_3_30_300",
-         "pct_meets_3_proximity", "pct_meets_3_visibility"]
+         "pct_meets_3_proximity", "pct_meets_3_visibility", "pct_meets_3_30_300_proximity",
+         "pct_meets_3_30_300_visibility"]
     ordered = [c for c in leading if c in result_df.columns]
     ordered += [c for c in result_df.columns if c not in ordered]
     result_df = result_df[ordered]
