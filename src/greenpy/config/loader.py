@@ -7,12 +7,15 @@ from .schema import (
     GreenPyConfig,
     ColumnMapping,
     DataPaths,
+    HeightSourceSpec,
+    HeightsConfig,
     OSMConfig,
     OpenBuildingsConfig,
     OvertureConfig,
     OutputPaths,
     TileSystemConfig,
     TreeSegmentationConfig,
+    VisibilityConfig,
     building_source,
     is_open_buildings,
     is_osm,
@@ -44,6 +47,8 @@ def load_config(path: str | Path) -> GreenPyConfig:
     open_buildings_cfg = _parse_open_buildings_section(raw.get("open_buildings") or {})
     overture_cfg = _parse_overture_section(raw.get("overture") or {})
     tree_seg_cfg = _parse_tree_segmentation_section(raw.get("tree_segmentation") or {})
+    heights_cfg = _parse_heights_section(raw.get("heights") or {})
+    visibility_cfg = _parse_visibility_section(raw.get("visibility") or {})
 
     output_raw = raw["output"]
     _require_section(output_raw, "output", "base_dir")
@@ -113,6 +118,8 @@ def load_config(path: str | Path) -> GreenPyConfig:
         overture=overture_cfg,
         open_buildings=open_buildings_cfg,
         tree_segmentation=tree_seg_cfg,
+        heights=heights_cfg,
+        visibility=visibility_cfg,
     )
 
 
@@ -282,6 +289,98 @@ def _parse_tree_segmentation_section(ts_raw: dict) -> TreeSegmentationConfig:
     if bad:
         raise ValueError(f"Unknown tree_segmentation.params {sorted(bad)}; expected some of {sorted(param_names)}")
     cfg.params = dict(cfg.params or {})
+    return cfg
+
+
+def _parse_height_source(entry, i: int) -> HeightSourceSpec:
+    """A heights.sources entry: a source name, or a mapping {source, name?, <options>}."""
+    from ..heights import REQUIRED_OPTIONS, SOURCE_NAMES, SOURCE_OPTIONS
+
+    where = f"heights.sources[{i}]"
+    if isinstance(entry, str):
+        entry = {"source": entry}
+    if not isinstance(entry, dict) or not isinstance(entry.get("source"), str):
+        raise ValueError(f"{where} must be a source name or a mapping with a 'source' key, got {entry!r}")
+    options = dict(entry)
+    source = options.pop("source").strip().lower()
+    name = options.pop("name", None)
+    if source not in SOURCE_NAMES:
+        raise ValueError(f"{where}: unknown height source {source!r}; expected one of {list(SOURCE_NAMES)}")
+    if name is not None and not (isinstance(name, str) and name):
+        raise ValueError(f"{where}.name must be a non-empty string, got {name!r}")
+    unknown = set(options) - SOURCE_OPTIONS[source]
+    if unknown:
+        raise ValueError(
+            f"{where}: unknown options {sorted(unknown)} for source {source!r}; "
+            f"expected some of {sorted(SOURCE_OPTIONS[source])}"
+        )
+    missing = REQUIRED_OPTIONS.get(source, set()) - set(options)
+    if missing:
+        raise ValueError(f"{where}: source {source!r} requires {sorted(missing)}")
+    if source == "file" and options.get("stat", "median") not in ("median", "mean", "max"):
+        raise ValueError(f"{where}.stat must be 'median', 'mean' or 'max', got {options['stat']!r}")
+    return HeightSourceSpec(source=source, options=options, name=name)
+
+
+def _parse_heights_section(h_raw: dict) -> HeightsConfig:
+    from dataclasses import fields
+
+    known = {f.name for f in fields(HeightsConfig)}
+    unknown = set(h_raw) - known
+    if unknown:
+        raise ValueError(f"Unknown heights keys {sorted(unknown)}; expected {sorted(known)}")
+    defaults = HeightsConfig()
+    sources_raw = h_raw.get("sources", ["native"])
+    if not isinstance(sources_raw, list) or not sources_raw:
+        raise ValueError("heights.sources must be a non-empty list")
+    sources = [_parse_height_source(e, i) for i, e in enumerate(sources_raw)]
+    labels = [s.label for s in sources]
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"heights.sources labels must be unique (set `name` to tell repeated sources apart): {labels}")
+
+    values = {}
+    for key in ("default_height", "storey_height", "min_height", "max_height", "min_overlap"):
+        v = h_raw.get(key, getattr(defaults, key))
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+            raise ValueError(f"heights.{key} must be a non-negative number, got {v!r}")
+        values[key] = float(v)
+    if values["storey_height"] <= 0:
+        raise ValueError("heights.storey_height must be positive")
+    if not values["min_height"] < values["max_height"]:
+        raise ValueError("heights.min_height must be below heights.max_height")
+    if not 0 < values["min_overlap"] <= 1:
+        raise ValueError(f"heights.min_overlap must be in (0, 1], got {values['min_overlap']!r}")
+    return HeightsConfig(sources=sources, **values)
+
+
+def _parse_visibility_section(v_raw: dict) -> VisibilityConfig:
+    from dataclasses import fields
+
+    known = {f.name for f in fields(VisibilityConfig)}
+    unknown = set(v_raw) - known
+    if unknown:
+        raise ValueError(f"Unknown visibility keys {sorted(unknown)}; expected {sorted(known)}")
+    cfg = VisibilityConfig(**v_raw)
+    if cfg.engine not in ("raster", "vector"):
+        raise ValueError(f"visibility.engine must be 'raster' or 'vector', got {cfg.engine!r}")
+    if cfg.vegetation not in ("auto", "chm", "crowns"):
+        raise ValueError(f"visibility.vegetation must be 'auto', 'chm' or 'crowns', got {cfg.vegetation!r}")
+    for key in ("facade_spacing", "resolution", "tile_size"):
+        v = getattr(cfg, key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+            raise ValueError(f"visibility.{key} must be a positive number, got {v!r}")
+    for key in ("facade_offset", "eye_height"):
+        v = getattr(cfg, key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0:
+            raise ValueError(f"visibility.{key} must be a non-negative number, got {v!r}")
+    if not (isinstance(cfg.crown_points, int) and not isinstance(cfg.crown_points, bool) and cfg.crown_points >= 0):
+        raise ValueError(f"visibility.crown_points must be a non-negative integer, got {cfg.crown_points!r}")
+    if not (isinstance(cfg.crown_point_height, (int, float)) and 0 < cfg.crown_point_height <= 1):
+        raise ValueError(f"visibility.crown_point_height must be in (0, 1], got {cfg.crown_point_height!r}")
+    if cfg.end_skip is not None and not (isinstance(cfg.end_skip, (int, float)) and cfg.end_skip >= 0):
+        raise ValueError(f"visibility.end_skip must be null or a non-negative number, got {cfg.end_skip!r}")
+    if not isinstance(cfg.mask_chm_buildings, bool):
+        raise ValueError("visibility.mask_chm_buildings must be true or false")
     return cfg
 
 

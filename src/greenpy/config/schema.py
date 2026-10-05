@@ -35,7 +35,7 @@ class ColumnMapping:
     # Buildings (building_id only required when buildings come from a file)
     building_id: str | None = None
     building_layer: str | None = None
-    # Building height in metres — required only by the Visibility module
+    # Building height in metres (file sources) — read by the "native" height source
     building_height_col: str | None = None
     # Keep only buildings whose building_use_col matches building_use_value (a
     # single value or a list). File-based sources only; OSM uses osm.building_types.
@@ -164,6 +164,62 @@ class TreeSegmentationConfig:
 
 
 @dataclass
+class HeightSourceSpec:
+    """One entry of heights.sources: a source name (see greenpy.heights.SOURCE_NAMES) and its options."""
+
+    source: str
+    options: dict = field(default_factory=dict)
+    # label written to height_source (default: the source name), e.g. "lidar" for a local nDSM
+    name: str | None = None
+
+    @property
+    def label(self) -> str:
+        return self.name or self.source
+
+
+@dataclass
+class HeightsConfig:
+    """Options for the Heights process, which attaches a height to every building footprint."""
+
+    # Ordered sources; for each building the first valid height wins
+    sources: list[HeightSourceSpec] = field(default_factory=lambda: [HeightSourceSpec("native")])
+    # Height given to buildings no source covers (height_source = "default")
+    default_height: float = 6.0
+    # Metres per storey: converts floor counts to heights and spaces Visibility's observer floors
+    storey_height: float = 3.0
+    # Vector sources: min share of a footprint's area a source polygon must cover to lend it its height
+    min_overlap: float = 0.3
+    # Heights outside [min_height, max_height] are treated as missing (falls through the chain)
+    min_height: float = 2.0
+    max_height: float = 300.0
+
+
+@dataclass
+class VisibilityConfig:
+    """Options for the Visibility process (line of sight from building windows to trees)."""
+
+    # "raster": DSM ray casting (default, scales); "vector": exact Sedona geometry (reference, small areas)
+    engine: str = "raster"
+    # Observer windows: a point every facade_spacing metres around each footprint, facade_offset
+    # metres outside the wall, at eye_height above each floor (floors from heights.storey_height)
+    facade_spacing: float = 5.0
+    facade_offset: float = 0.5
+    eye_height: float = 1.5
+    # Targets: the treetop plus crown_points points on the crown at crown_point_height x tree height
+    crown_points: int = 4
+    crown_point_height: float = 2 / 3
+    # Raster engine: DSM pixel size (m), vegetation surface ("auto": CHM when one is configured,
+    # else rasterised crowns; "chm"; "crowns"), and whether CHM pixels on roofs are dropped
+    resolution: float = 1.0
+    vegetation: str = "auto"
+    mask_chm_buildings: bool = True
+    # Metres ignored at both ends of each sightline (None = resolution)
+    end_skip: float | None = None
+    # Raster engine: buildings are processed in square tiles of this side (m)
+    tile_size: float = 2000.0
+
+
+@dataclass
 class GreenPyConfig:
     study_area_name: str
     crs: str
@@ -189,3 +245,6 @@ class GreenPyConfig:
     overture: OvertureConfig = field(default_factory=OvertureConfig)
     # Options for the Trees process
     tree_segmentation: TreeSegmentationConfig = field(default_factory=TreeSegmentationConfig)
+    # Options for the Heights process (building heights) and the Visibility process
+    heights: HeightsConfig = field(default_factory=HeightsConfig)
+    visibility: VisibilityConfig = field(default_factory=VisibilityConfig)
