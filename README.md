@@ -293,7 +293,7 @@ First results (raster engine, 16 threads):
 | Bogotá — 2.17 M buildings, global heights, Meta CHM | 50 m | 8 min | 4.7 | 1.2 (1.0) | 28.9 % → 10.7 % |
 | | 100 m | 9 min | 20.9 | 2.8 (2.1) | 60.7 % → 17.5 % |
 
-Peak memory was 0.6 GB (Cambridge) and 4.2 GB (Bogotá). Swapping Verisk for GBA heights in Cambridge changed `meets_3` for 1.6 % of buildings. Where vegetation comes from the CHM, every canopy pixel blocks — street trees hide each other — so a smaller share of the candidates is visible than with crown polygons.
+These runs used flat ground and no context ring. With FABDEM terrain and the 100 m ring (210 k ring trees, 10.6 k ring buildings), Bogotá took 13 min per buffer; the share meeting the 3 by visibility barely moved (10.7 % → 10.7 % at 50 m, 17.5 % → 17.6 % at 100 m) — most of the city sits on the flat Sabana — but terrain changed the visible-tree count of 27–34 % of buildings on the eastern hillsides (Chapinero, La Candelaria, Santa Fe) against 6–8 % on the plain, and the ring added candidates for 0.3 % (50 m) and 0.9 % (100 m) of buildings. Peak memory was 0.6 GB (Cambridge) and 4.3 GB (Bogotá). Swapping Verisk for GBA heights in Cambridge changed `meets_3` for 1.6 % of buildings. Where vegetation comes from the CHM, every canopy pixel blocks — street trees hide each other — so a smaller share of the candidates is visible than with crown polygons.
 
 ### Merge and the 3-30-300 rule
 
