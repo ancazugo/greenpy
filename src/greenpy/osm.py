@@ -62,6 +62,14 @@ def _osm_ids(gdf: gpd.GeoDataFrame) -> pd.Series:
     return gdf["element"].astype(str) + "/" + gdf["id"].astype(str)
 
 
+def parse_osm_height(values: pd.Series) -> pd.Series:
+    """Metres from OSM height tags ("12", "12 m", "12.5m", "40'", "40 ft"); unparseable values become NaN."""
+    text = values.astype("string").str.strip().str.lower()
+    number = pd.to_numeric(text.str.extract(r"^([0-9]+(?:\.[0-9]+)?)", expand=False), errors="coerce")
+    feet = text.str.contains(r"'|ft|feet", regex=True, na=False)
+    return number.where(~feet, number * 0.3048).astype(float)
+
+
 def fetch_osm_buildings(polygon_4326: Polygon | MultiPolygon, building_types: list[str] | None, crs: str) -> gpd.GeoDataFrame:
     """Fetch building footprints from OSM with canonical column `building_id`.
 
@@ -79,7 +87,13 @@ def fetch_osm_buildings(polygon_4326: Polygon | MultiPolygon, building_types: li
     if gdf.empty:
         raise ValueError("OSM returned no building polygons for the study area — check the boundary or osm.building_types")
     gdf["building_id"] = _osm_ids(gdf)
-    gdf = gdf[[c for c in ("building_id", "building", "geometry") if c in gdf.columns]]
+    # height / building:levels tags feed the Heights process (native source)
+    if "height" in gdf.columns:
+        gdf["building_height"] = parse_osm_height(gdf["height"])
+    if "building:levels" in gdf.columns:
+        gdf["num_floors"] = pd.to_numeric(gdf["building:levels"], errors="coerce")
+    keep = ("building_id", "building", "building_height", "num_floors", "geometry")
+    gdf = gdf[[c for c in keep if c in gdf.columns]]
     logger.info(f"Fetched {len(gdf)} OSM buildings")
     return _stringify_list_columns(gdf.to_crs(crs).reset_index(drop=True))
 

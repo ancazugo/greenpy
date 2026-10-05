@@ -51,10 +51,14 @@ def fetch_overture_buildings(polygon_4326: Polygon | MultiPolygon, crs: str) -> 
         if n_missing:
             logger.warning(
                 f"Overture buildings: {n_missing}/{n_total} ({n_missing / n_total:.1%}) footprints have no height — "
-                "the Visibility module drops NULL-height buildings, so visibility results will be biased "
+                "add height sources to heights.sources (e.g. gba, ghs_built_h) before running Visibility "
                 "(Overture height coverage is sparse outside major cities)"
             )
-    gdf = gdf[[c for c in ("building_id", "building_height", "subtype", "class", "geometry") if c in gdf.columns]]
+    if "num_floors" in gdf.columns:
+        # floor counts back up missing heights in the Heights process (native source)
+        gdf["num_floors"] = pd.to_numeric(gdf["num_floors"], errors="coerce")
+    keep = ("building_id", "building_height", "num_floors", "subtype", "class", "geometry")
+    gdf = gdf[[c for c in keep if c in gdf.columns]]
     logger.info(f"Fetched {len(gdf)} Overture buildings")
     return gdf.to_crs(crs).reset_index(drop=True)
 
