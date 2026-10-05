@@ -24,8 +24,8 @@ from pyspark.sql.dataframe import DataFrame
 from pyspark.sql.functions import monotonically_increasing_id
 from pyspark.sql.session import SparkSession
 
-from ..config.schema import GreenPyConfig
-from ..utils.data_processing import (
+from ...config.schema import GreenPyConfig
+from ...utils.data_processing import (
     drop_geo_views,
     get_geometries,
     load_trees_gdf,

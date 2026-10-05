@@ -44,6 +44,8 @@ def setup_output_dirs(cfg: GreenPyConfig) -> dict[str, Path]:
         "spectral": base / "Spectral",
         "tree_count": base / "Tree_count",
         "visibility": base / "Visibility",
+        # the vector (Sedona) engine's results, kept apart so Merge never mixes engines
+        "visibility_vector": base / "Visibility_vector",
         "database": base / "database",
     }
     for d in dirs.values():

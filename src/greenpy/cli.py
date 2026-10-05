@@ -64,7 +64,8 @@ def run(
     buffer: int = typer.Option(100, "--buffer", help="Buffer radius in metres around each building (T3, T30_buildings; 0 = footprint only)"),
     tree_area: int = typer.Option(10, "--tree_area", help="Trees count only if canopy area (m²) is strictly greater than this (T3, Visibility)"),
     tree_height: int = typer.Option(3, "--tree_height", help="Trees count only if height (m) is strictly greater than this (T3, Visibility)"),
-    observer_mode: str = typer.Option("facade", "--observer_mode", help="Visibility observer point: facade (nearest footprint boundary point to the tree) or centroid"),
+    vis_engine: Optional[str] = typer.Option(None, "--vis_engine", help="Visibility engine: raster (DSM ray casting, default) or vector (exact Sedona geometry, small areas); overrides visibility.engine"),
+    observer_mode: Optional[str] = typer.Option(None, "--observer_mode", help="[deprecated, ignored] Visibility observers are facade points at every floor (see the visibility config section)"),
     low_threshold: int = typer.Option(3, "--low_threshold", help="Min canopy height in metres for T30 binarisation"),
     high_threshold: int = typer.Option(60, "--high_threshold", help="Max canopy height in metres for T30 binarisation"),
     gee_scale: float = typer.Option(1.0, "--gee_scale", help="Download scale in metres for the T30 GEE canopy source (coarser scales store canopy fraction per pixel)"),
@@ -111,8 +112,11 @@ def run(
         typer.echo(f"Error: --composite must be 'max' or 'median', got '{composite}'", err=True)
         raise typer.Exit(1)
 
-    if observer_mode not in ("facade", "centroid"):
-        typer.echo(f"Error: --observer_mode must be 'facade' or 'centroid', got '{observer_mode}'", err=True)
+    if observer_mode is not None:
+        logger.warning("--observer_mode is deprecated and ignored: observers are facade points at every floor")
+    vis_engine = vis_engine or cfg.visibility.engine
+    if vis_engine not in ("raster", "vector"):
+        typer.echo(f"Error: --vis_engine must be 'raster' or 'vector', got '{vis_engine}'", err=True)
         raise typer.Exit(1)
 
     if geo_level and geo_level not in geo_levels:
@@ -182,6 +186,13 @@ def run(
         _run_heights(cfg, overwrite)
         return
 
+    if process == "Visibility" and vis_engine == "raster":
+        _run_visibility_raster(
+            cfg, geo_level or geo_levels[0], sub_geo_level or geo_levels[-1], geo_code,
+            buffer, tree_area, tree_height, dggs, dggs_resolution, n_workers if parallel else None, overwrite,
+        )
+        return
+
     if process == "Spectral":
         from .optional.spectral import setup_gee, process_geo_code as process_spectral
         if not cfg.gee_boundaries_asset:
@@ -208,7 +219,7 @@ def run(
     tables = load_tables(sedona, cfg, dggs=dggs, dggs_resolution=dggs_resolution)
     dirs = tables["output_dirs"]
 
-    output_dir_map = {"T3": dirs["t3"], "T30": dirs["t30"], "T30_buildings": dirs["t30_buildings"], "T300": dirs["t300"], "Tree_count": dirs["tree_count"], "Visibility": dirs["visibility"]}
+    output_dir_map = {"T3": dirs["t3"], "T30": dirs["t30"], "T30_buildings": dirs["t30_buildings"], "T300": dirs["t300"], "Tree_count": dirs["tree_count"], "Visibility": dirs["visibility_vector"]}
     output_dir = output_dir_map[process]
     if dggs is not None and process in ("T30", "Tree_count"):
         # grid runs sit beside the census-unit outputs instead of overwriting them
@@ -225,7 +236,6 @@ def run(
         "buffer": buffer,
         "tree_area": tree_area,
         "tree_height": tree_height,
-        "observer_mode": observer_mode,
         "low_threshold": low_threshold,
         "high_threshold": high_threshold,
         "gee_scale": gee_scale,
@@ -258,6 +268,45 @@ def _run_heights(cfg, overwrite: bool) -> None:
     if not (db_dir / "buildings.parquet").exists():
         _setup_parquet_files(cfg, db_dir)
     build_building_heights(cfg, overwrite=overwrite)
+
+
+def _run_visibility_raster(
+    cfg, geo_level: str, sub_geo_level: str, geo_code: str | None, buffer: int, tree_area: int, tree_height: int,
+    dggs: str | None, dggs_resolution: int | None, n_threads: int | None, overwrite: bool,
+) -> None:
+    """Visibility with the raster engine: geo codes in turn, each ray-cast on n_threads threads (no Spark
+    unless a DGGS overlay has to be built)."""
+    import os
+
+    import numba
+    import pandas as pd
+
+    from .optional.visibility.inputs import VisibilityInputs
+    from .optional.visibility.params import VisibilityParams
+    from .optional.visibility.raster_engine import process_geo_code_raster
+    from .pipeline import _setup_parquet_files, ensure_dggs_files
+
+    if not cfg.data.trees_dir:
+        raise typer.BadParameter("Visibility needs data.trees_dir (tree crowns with heights)")
+    dirs = setup_output_dirs(cfg)
+    db_dir = dirs["database"]
+    if not (db_dir / "buildings.parquet").exists():
+        _setup_parquet_files(cfg, db_dir)
+    boundaries_path, overlay_path = db_dir / "census_boundaries.parquet", db_dir / "census_buildings_overlay.parquet"
+    if dggs is not None:
+        boundaries_path, overlay_path = ensure_dggs_files(get_spark(), db_dir, cfg, dggs, dggs_resolution)
+
+    numba.set_num_threads(min(n_threads or min(os.cpu_count() or 1, 16), numba.config.NUMBA_NUM_THREADS))
+    params = VisibilityParams.from_cfg(cfg, buffer, tree_area, tree_height)
+    inputs = VisibilityInputs.load(cfg, overlay_path)
+    codes = [geo_code] if geo_code else pd.read_parquet(boundaries_path, columns=[geo_level])[geo_level].dropna().unique()
+    logger.info(f"Visibility (raster): {len(codes)} regions, buffer {buffer} m, {numba.get_num_threads()} threads")
+    failed = [
+        code for code in tqdm(codes, desc="Regions")
+        if process_geo_code_raster(geo_level, code, sub_geo_level, cfg, inputs, params, dirs["visibility"], overwrite) is None
+    ]
+    if failed:
+        logger.error(f"Visibility failed for {len(failed)} regions: {failed}")
 
 
 def _run_trees(cfg, geo_level: str, geo_code: str | None, n_workers: int, overwrite: bool) -> None:
