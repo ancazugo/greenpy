@@ -328,7 +328,7 @@ All controls sit in a sidebar on the left, split into **Map** (basemap, parks, t
 - **Parks** shows the green spaces T300 counts (solid; at least `park_min_area_ha`) and the smaller ignored ones (dashed); click one for its name and area.
 - **Trees** from `data.trees_dir` are drawn to scale (crown radius from the area column or polygon area) or as dots when only points are available. Green is reserved for trees and purple for parks; the default metric ramps are blues, red–blue and orange–brown.
 - Drag across the legend histogram to show only a value range; click a feature for all of its values.
-- Basemaps (no API keys): none, OpenFreeMap Positron or Liberty, OpenStreetMap, or Sentinel-2 imagery (EOX, non-commercial).
+- Basemaps (no API keys): none, OpenFreeMap Positron or Liberty, OpenStreetMap, Esri World Imagery (sub-metre in most cities; Esri attribution, and Esri's terms expect an ArcGIS account beyond light non-commercial use), or Sentinel-2 imagery (EOX, 10 m, non-commercial).
 
 Merge is optional: module CSVs are read directly when its parquets are missing. The first start builds `database/viz.duckdb` (geometry reprojected and indexed, statistics precomputed), and later starts reuse it until an output changes; `--rebuild` forces a rebuild and `--no-trees` skips the tree layer. Buildings and trees appear from zoom 14 (a view about 3.5 km across), which keeps whole-city datasets responsive; zoomed further out, show units instead.
 

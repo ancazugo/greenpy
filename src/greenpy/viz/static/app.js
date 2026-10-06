@@ -46,6 +46,12 @@ const BASEMAPS = {
     attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     maxzoom: 19, saturation: -0.5,
   },
+  esri: {
+    label: "Esri World Imagery",
+    raster: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+    attribution: 'Imagery © <a href="https://www.esri.com">Esri</a> — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community',
+    maxzoom: 19, saturation: 0,
+  },
   eox: {
     label: "Sentinel-2 imagery (non-commercial)",
     raster: ["https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2020_3857/default/g/{z}/{y}/{x}.jpg"],
@@ -704,6 +710,9 @@ function renderParksLegend() {
 
 /* ---------- study-area summary ---------- */
 
+// stores built before the unit count was recorded only know the level
+const unitsText = cc => (cc.units ? `${cc.units.toLocaleString()} ${cc.layer} units` : `${cc.layer} units`);
+
 function renderSummary() {
   const sm = state.catalog.summary;
   const box = $("summary");
@@ -719,7 +728,7 @@ function renderSummary() {
   if (sm.canopy_cover) {
     const cc = sm.canopy_cover;
     figures.push(["Canopy cover", fmt(cc.value, { kind: "percent" }),
-      `Total canopy ÷ total measured area of the ${cc.units.toLocaleString()} ${cc.layer} units T30 covered (nodata pixels excluded) — not an average of unit percentages`]);
+      `Total canopy ÷ total measured area of the ${unitsText(cc)} T30 covered (nodata pixels excluded) — not an average of unit percentages`]);
   }
   for (const m of sm.medians) figures.push([`Median ${m.label[0].toLowerCase()}${m.label.slice(1)}`, fmt(m.value, m)]);
 
@@ -746,7 +755,7 @@ function renderSummary() {
   }
   if (sm.canopy_cover) {
     box.querySelector(".summary-body").insertBefore(
-      el("p", { class: "method" }, `Canopy: total canopy ÷ total area over all ${sm.canopy_cover.units.toLocaleString()} ${sm.canopy_cover.layer} units.`),
+      el("p", { class: "method" }, `Canopy: total canopy ÷ total area over all ${unitsText(sm.canopy_cover)}.`),
       box.querySelector(".rule"));
   }
   if (crit.length) {
