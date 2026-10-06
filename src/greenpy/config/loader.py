@@ -84,6 +84,7 @@ def load_config(path: str | Path) -> GreenPyConfig:
             chm_overlap=_parse_chm_overlap(data_raw.get("chm_overlap")),
             chm_cache_dir=data_raw.get("chm_cache_dir"),
             canopy_height_ee_path=data_raw.get("canopy_height_ee_path"),
+            meta_chm=_parse_meta_chm(data_raw.get("meta_chm")),
         ),
         columns=ColumnMapping(
             building_id=columns_raw.get("building_id"),
@@ -128,6 +129,17 @@ def load_config(path: str | Path) -> GreenPyConfig:
         terrain=terrain_cfg,
         context_buffer=float(context_buffer),
     )
+
+
+def _parse_meta_chm(value) -> str | None:
+    from ..optional.chm_sources import META_VERSIONS
+
+    if value is None:
+        return None
+    value = str(value).strip().lower()
+    if value not in META_VERSIONS:
+        raise ValueError(f"data.meta_chm must be one of {sorted(META_VERSIONS)}, got {value!r}")
+    return value
 
 
 def _parse_park_min_area(value) -> float | None:

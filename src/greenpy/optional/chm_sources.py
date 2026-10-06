@@ -11,12 +11,19 @@ same way:
   layouts), or each overlapping set becomes its own layer on a shared grid and
   the reader takes the per-pixel maximum ("max": a tree seen in any survey
   counts — useful when a later survey was flown leaf-off).
-- Meta/WRI global canopy height (1 m, EPSG:3857, whole metres): zoom-9
-  quadkey GeoTIFFs on the public AWS bucket, downloaded once into the cache.
-  Their strip layout makes remote windowed reads slow, so whole tiles are kept.
+- Meta/WRI global canopy height (1 m, EPSG:3857, whole metres) on the public
+  AWS bucket, downloaded once into the cache as whole tiles:
+  - v1 (Tolan et al. 2024, `forests/v1/alsgedi_global_v6_float`): zoom-9
+    quadkey GeoTIFFs in strips, which make remote windowed reads slow.
+  - v2 (`forests/v2/global/dinov3_global_chm_v2_ml3`): zoom-10 quadkey uint8
+    COGs with no declared nodata — unimaged pixels (e.g. sea) read 0, like
+    bare ground. Each tile ships a metadata GeoJSON of the imagery footprints
+    (with acq_date); pixels outside them are written as nodata on download,
+    and the footprints are kept beside the tile.
 """
 
 import hashlib
+import json
 import math
 import os
 from pathlib import Path
@@ -34,8 +41,22 @@ from shapely.geometry import box
 
 from ..utils.data_processing import is_chm_tile
 
-META_CHM_URL = "https://dataforgood-fb-data.s3.amazonaws.com/forests/v1/alsgedi_global_v6_float/chm/{quadkey}.tif"
+_META_BUCKET = "https://dataforgood-fb-data.s3.amazonaws.com/forests"
+META_CHM_URL = f"{_META_BUCKET}/v1/alsgedi_global_v6_float/chm/{{quadkey}}.tif"
 META_ZOOM = 9
+
+# Meta CHM releases: tile URL, quadkey zoom, cache subdirectory, imagery-footprint URL
+META_VERSIONS = {
+    "v1": {"url": META_CHM_URL, "zoom": META_ZOOM, "dir": "meta_chm", "footprints": None},
+    "v2": {
+        "url": f"{_META_BUCKET}/v2/global/dinov3_global_chm_v2_ml3/chm/{{quadkey}}.tif",
+        "zoom": 10,
+        "dir": "meta_chm_v2",
+        "footprints": f"{_META_BUCKET}/v2/global/dinov3_global_chm_v2_ml3/metadata/{{quadkey}}.geojson",
+    },
+}
+# nodata written into v2 tiles outside the imagery footprints (heights are uint8 metres)
+META_V2_NODATA = 255
 
 
 # --------------------------------------------------------------------------- #
@@ -114,15 +135,23 @@ def quadkeys_for_bounds(west: float, south: float, east: float, north: float, zo
     return [quadkey(x, y, zoom) for y in range(y0, y1 + 1) for x in range(x0, x1 + 1)]
 
 
-def download_meta_tiles(boundary_gdf: gpd.GeoDataFrame, cache_dir: Path, overwrite: bool = False) -> list[str]:
-    """Download the Meta CHM tiles covering the boundary into cache_dir/meta_chm; returns local paths.
+def download_meta_tiles(
+    boundary_gdf: gpd.GeoDataFrame, cache_dir: Path, overwrite: bool = False, version: str = "v1",
+) -> list[str]:
+    """Download the Meta CHM tiles covering the boundary into the cache; returns local paths.
 
-    Tiles missing from the bucket (open ocean) are skipped. Downloads go to a
-    .part file first, so an interrupted run never leaves a truncated tile.
+    version selects the release (META_VERSIONS); each has its own cache
+    subdirectory. Tiles missing from the bucket (open ocean) are skipped.
+    Downloads go to a .part file first, so an interrupted run never leaves a
+    truncated tile. v2 tiles are masked to their imagery footprints before
+    they are cached.
     """
-    out_dir = Path(cache_dir) / "meta_chm"
+    if version not in META_VERSIONS:
+        raise ValueError(f"Unknown Meta CHM version {version!r}; expected one of {sorted(META_VERSIONS)}")
+    spec = META_VERSIONS[version]
+    out_dir = Path(cache_dir) / spec["dir"]
     out_dir.mkdir(parents=True, exist_ok=True)
-    keys = quadkeys_for_bounds(*boundary_gdf.to_crs("EPSG:4326").total_bounds)
+    keys = quadkeys_for_bounds(*boundary_gdf.to_crs("EPSG:4326").total_bounds, zoom=spec["zoom"])
     paths = []
     for qk in keys:
         path = out_dir / f"{qk}.tif"
@@ -130,14 +159,14 @@ def download_meta_tiles(boundary_gdf: gpd.GeoDataFrame, cache_dir: Path, overwri
             ensure_tiled(path)
             paths.append(str(path))
             continue
-        url = META_CHM_URL.format(quadkey=qk)
+        url = spec["url"].format(quadkey=qk)
         with requests.get(url, stream=True, timeout=60) as r:
             if r.status_code in (403, 404):
                 logger.warning(f"Meta CHM tile {qk} not available ({r.status_code}), skipping")
                 continue
             r.raise_for_status()
             size = int(r.headers.get("Content-Length", 0))
-            logger.info(f"Downloading Meta CHM tile {qk} ({size / 1e6:.0f} MB)")
+            logger.info(f"Downloading Meta CHM {version} tile {qk} ({size / 1e6:.0f} MB)")
             part = path.with_suffix(".tif.part")
             with open(part, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8 << 20):
@@ -145,10 +174,73 @@ def download_meta_tiles(boundary_gdf: gpd.GeoDataFrame, cache_dir: Path, overwri
             if size and part.stat().st_size != size:
                 part.unlink()
                 raise IOError(f"Incomplete download of Meta CHM tile {qk}")
+        if spec["footprints"]:
+            footprints = _download_footprints(spec["footprints"].format(quadkey=qk), path.with_suffix(".geojson"))
+            mask_to_footprints(part, footprints, path)
+            part.unlink()
+        else:
             part.rename(path)
         ensure_tiled(path)
         paths.append(str(path))
     return paths
+
+
+def _download_footprints(url: str, out_path: Path) -> dict:
+    """Fetch a v2 tile's imagery-footprint GeoJSON (EPSG:4326, with acq_date) and keep it beside the tile."""
+    r = requests.get(url, timeout=60)
+    if r.status_code in (403, 404):
+        # without footprints the tile cannot be masked; treat it as fully imaged
+        logger.warning(f"No imagery footprints at {url}; the tile is used unmasked")
+        return {"type": "FeatureCollection", "features": []}
+    r.raise_for_status()
+    out_path.write_text(r.text)
+    return r.json()
+
+
+def mask_to_footprints(src_path: Path, footprints: dict, dst_path: Path, block_rows: int = 4096) -> None:
+    """Copy a uint8 v2 CHM tile to dst_path as a tiled GeoTIFF with nodata outside the imagery footprints.
+
+    With no footprint features the tile is copied unmasked (nodata still
+    declared, so every pixel stays valid). Written row-band by row-band to
+    keep memory bounded on 32768 px tiles.
+    """
+    import rasterio.features
+    from rasterio.warp import transform_geom
+
+    with rasterio.open(src_path) as src:
+        geoms = [transform_geom("EPSG:4326", src.crs, f["geometry"]) for f in footprints.get("features", [])]
+        profile = src.profile.copy()
+        profile.update(driver="GTiff", tiled=True, blockxsize=512, blockysize=512, compress="deflate",
+                       nodata=META_V2_NODATA, bigtiff="IF_SAFER")
+        tmp = dst_path.with_name(f"{dst_path.name}.{os.getpid()}.mask")
+        n_masked = 0
+        with rasterio.open(tmp, "w", **profile) as dst:
+            for row in range(0, src.height, block_rows):
+                win = rasterio.windows.Window(0, row, src.width, min(block_rows, src.height - row))
+                z = src.read(1, window=win)
+                if geoms:
+                    inside = rasterio.features.geometry_mask(
+                        geoms, (int(win.height), int(win.width)), rasterio.windows.transform(win, src.transform),
+                        invert=True,
+                    )
+                    n_masked += int((~inside).sum())
+                    z = np.where(inside, z, META_V2_NODATA).astype(z.dtype)
+                dst.write(z, 1, window=win)
+        total = src.width * src.height
+    tmp.replace(dst_path)
+    if n_masked:
+        logger.info(f"Masked {100 * n_masked / total:.1f}% of {dst_path.name} outside the imagery footprints")
+
+
+def footprint_dates(paths: list[str]) -> tuple[str, str] | None:
+    """(earliest, latest) imagery acq_date across the cached footprints of v2 tiles, or None."""
+    dates = []
+    for p in paths:
+        fp = Path(p).with_suffix(".geojson")
+        if fp.exists():
+            dates += [f["properties"].get("acq_date") for f in json.loads(fp.read_text()).get("features", [])]
+    dates = sorted(d for d in dates if d)
+    return (dates[0], dates[-1]) if dates else None
 
 
 def ensure_tiled(path: Path, block: int = 512, threads: int = 8) -> None:
@@ -248,11 +340,13 @@ def chm_mosaic(
     chm_pattern: str = "*.tif",
     overwrite: bool = False,
     overlap: str = "latest",
+    meta_version: str = "v1",
 ) -> list[Path]:
     """VRT layers over the CHM covering the boundary, from local tiles ("chm_tiles") or Meta ("meta").
 
-    With overlap="latest" a single VRT where later tiles win; with "max", one
-    VRT per set of non-overlapping tiles on a shared grid, to be combined by
+    meta_version picks the Meta release (META_VERSIONS). With
+    overlap="latest" a single VRT where later tiles win; with "max", one VRT
+    per set of non-overlapping tiles on a shared grid, to be combined by
     per-pixel maximum.
     """
     if overlap not in ("latest", "max"):
@@ -264,9 +358,10 @@ def chm_mosaic(
         if not paths:
             raise FileNotFoundError(f"No CHM tiles matching {chm_pattern} in {chm_tiles_dir} overlap the boundary")
     elif source == "meta":
-        paths = download_meta_tiles(boundary_gdf, Path(cache_dir), overwrite=overwrite)
+        paths = download_meta_tiles(boundary_gdf, Path(cache_dir), overwrite=overwrite, version=meta_version)
         if not paths:
             raise FileNotFoundError("No Meta CHM tiles cover the boundary")
+        source = f"meta_{meta_version}"  # versions get separate VRTs
     else:
         raise ValueError(f"Unknown CHM source '{source}', expected 'chm_tiles' or 'meta'")
     return mosaic_layers(paths, Path(cache_dir) / "vrt", f"{source}_{name}", overlap)

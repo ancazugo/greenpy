@@ -209,7 +209,8 @@ def process_geo_code(
     """Compute canopy cover (%) within `buffer` metres of each building in one geo_code.
 
     Canopy source, in T30's priority order: local CHM raster tiles
-    (cfg.data.chm_tiles_dir) > a GEE canopy-height asset binarised server-side
+    (cfg.data.chm_tiles_dir) > the Meta/WRI CHM from AWS (cfg.data.meta_chm)
+    > a GEE canopy-height asset binarised server-side
     (cfg.data.canopy_height_ee_path) > tree polygon areas (cfg.data.trees_dir).
     Writes `T30_buildings_<geo_code>_<buffer>m.csv` with columns building_id,
     tree_pixels, total_pixels, canopy_cover. Returns the DataFrame, the cached
@@ -262,6 +263,15 @@ def process_geo_code(
                 sedona, chm_paths, geo_code, epsg, low_threshold, high_threshold
             )
 
+        elif cfg.data.meta_chm:
+            from .optional.canopy_meta import meta_binary_canopy, meta_cache_path
+            # buffer-suffixed cache: T30's raster only covers the unbuffered boundary bounds
+            cache = meta_cache_path(cfg, f"{geo_code}_b{buffer}m", low_threshold, high_threshold)
+            meta_binary_canopy(search_gdf, cfg, low_threshold, high_threshold, cache_path=cache, overwrite=overwrite)
+            result_df = get_canopy_cover_buildings_raster(
+                sedona, [cache], geo_code, epsg, already_binary=True
+            )
+
         elif cfg.data.canopy_height_ee_path:
             from .optional.canopy_gee import download_binary_canopy, gee_cache_path  # lazy: keeps ee/xee optional
             # buffer-suffixed cache: T30's raster only covers the unbuffered boundary bounds
@@ -280,7 +290,7 @@ def process_geo_code(
 
         else:
             raise ValueError(
-                "No canopy source configured — set one of chm_tiles_dir, "
+                "No canopy source configured — set one of chm_tiles_dir, meta_chm, "
                 "canopy_height_ee_path, or trees_dir to compute T30_buildings"
             )
 

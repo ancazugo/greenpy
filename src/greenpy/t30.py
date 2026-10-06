@@ -144,8 +144,9 @@ def process_geo_code(
     """Compute T30 (canopy cover %) per sub_geo_level unit within one geo_code.
 
     Canopy source, in priority order: local CHM raster tiles
-    (cfg.data.chm_tiles_dir) > a GEE canopy-height asset binarised server-side
-    and downloaded at gee_scale metres (cfg.data.canopy_height_ee_path) > tree
+    (cfg.data.chm_tiles_dir) > the Meta/WRI CHM from AWS (cfg.data.meta_chm,
+    v1 or v2) > a GEE canopy-height asset binarised server-side and
+    downloaded at gee_scale metres (cfg.data.canopy_height_ee_path) > tree
     polygon areas (cfg.data.trees_dir). Writes `T30_<geo_code>.csv` with
     columns <sub_geo_level>, canopy_cover, total_pixels. Returns the
     DataFrame, the cached CSV when overwrite is False, or None on error.
@@ -168,6 +169,14 @@ def process_geo_code(
             binary_chm_xr = binarise_tiles(chm_paths, low_threshold, high_threshold, target_crs=cfg.crs, overlap=cfg.data.chm_overlap)
             geo_canopy_cover_df = get_canopy_cover_raster(geo_boundary_gdf, binary_chm_xr)
 
+        elif cfg.data.meta_chm:
+            from .optional.canopy_meta import meta_binary_canopy, meta_cache_path
+            binary_chm_xr = meta_binary_canopy(
+                geo_boundary_gdf, cfg, low_threshold, high_threshold,
+                cache_path=meta_cache_path(cfg, geo_code, low_threshold, high_threshold), overwrite=overwrite,
+            )
+            geo_canopy_cover_df = get_canopy_cover_raster(geo_boundary_gdf, binary_chm_xr)
+
         elif cfg.data.canopy_height_ee_path:
             from .optional.canopy_gee import download_binary_canopy, gee_cache_path  # lazy: keeps ee/xee optional
             cache = gee_cache_path(cfg, geo_code, low_threshold, high_threshold, gee_scale)
@@ -183,7 +192,7 @@ def process_geo_code(
 
         else:
             raise ValueError(
-                "No canopy source configured — set one of chm_tiles_dir, "
+                "No canopy source configured — set one of chm_tiles_dir, meta_chm, "
                 "canopy_height_ee_path, or trees_dir to compute T30"
             )
 

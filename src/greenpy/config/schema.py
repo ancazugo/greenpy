@@ -93,6 +93,11 @@ class DataPaths:
     chm_cache_dir: str | None = None
     # GEE canopy-height asset (e.g. projects/sat-io/open-datasets/facebook/meta-canopy-height)
     canopy_height_ee_path: str | None = None
+    # Meta/WRI global 1 m CHM from the public AWS bucket, "v1" or "v2". When set
+    # it is the canopy source of T30/T30_buildings (after chm_tiles_dir, before
+    # canopy_height_ee_path) and the release used wherever the "meta" CHM source
+    # is read (Trees, raster Visibility); None there means v1.
+    meta_chm: str | None = None
 
 
 @dataclass

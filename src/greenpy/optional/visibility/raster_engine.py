@@ -41,7 +41,7 @@ def vegetation_mode(cfg: GreenPyConfig, params: VisibilityParams) -> str:
     """'chm' when a canopy height model is configured (auto) or requested, else 'crowns'."""
     if params.vegetation != "auto":
         return params.vegetation
-    explicit = cfg.data.chm_tiles_dir or cfg.tree_segmentation.source
+    explicit = cfg.data.chm_tiles_dir or cfg.data.meta_chm or cfg.tree_segmentation.source
     return "chm" if explicit else "crowns"
 
 
@@ -53,6 +53,7 @@ def _chm_layers(cfg: GreenPyConfig, bounds: tuple, name: str) -> list:
     return chm_mosaic(
         area, chm_source(cfg), cache_dir_for(cfg), name,
         chm_tiles_dir=cfg.data.chm_tiles_dir, chm_pattern=cfg.data.chm_pattern, overlap=cfg.data.chm_overlap,
+        meta_version=cfg.data.meta_chm or "v1",
     )
 
 

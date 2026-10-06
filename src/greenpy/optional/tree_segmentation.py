@@ -578,6 +578,7 @@ def process_geo_code(
         layers = chm_mosaic(
             context, chm_source(cfg), cache, f"{geo_level}_{geo_code}",
             chm_tiles_dir=cfg.data.chm_tiles_dir, chm_pattern=cfg.data.chm_pattern, overlap=cfg.data.chm_overlap,
+            meta_version=cfg.data.meta_chm or "v1",
         )
         with rasterio.open(layers[0]) as src:
             region = boundary.to_crs(src.crs).geometry.iloc[0]
