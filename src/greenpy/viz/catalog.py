@@ -161,9 +161,11 @@ def describe(name: str, module: str = "") -> Metric:
         return Metric(name, f"Trees visible from the ground floor within {m.group(1)} m", module or "Visibility",
                       "count", RULE_MIN_TREES, "high", note="As trees visible, but from ground-floor windows only.")
     if m := re.fullmatch(r"share_visible_(\d+)m", base):
+        how = ("Over all building-tree pairs in the area." if module == "Merge"
+               else "Buildings with no tree within the buffer have no value.")
         return Metric(name, f"Trees within {m.group(1)} m that are in view (%)", module or "Visibility", "percent",
                       better="high", note="Of the trees within the buffer, the share some window sees; the rest are "
-                      "hidden by buildings, other trees or terrain. Areas: over all building-tree pairs.")
+                      f"hidden by buildings, other trees or terrain. {how}")
     if base == "building_height":
         return Metric(name, "Building height (m)", module or "Heights", "value",
                       note="From the heights chain (first source with a valid height); used for Visibility's floors.")

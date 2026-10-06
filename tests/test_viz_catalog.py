@@ -154,4 +154,5 @@ def test_per_metric_rule_labels():
     m = describe("share_visible_100m")
     assert (m.kind, m.module, m.threshold, m.better) == ("percent", "Visibility", None, "high")
     assert describe("mean_share_visible_50m").label.startswith("Mean trees within 50 m")
+    assert "pairs" in describe("share_visible_50m", "Merge").note and "pairs" not in m.note
     assert describe("criteria_met_visibility").threshold == 3
