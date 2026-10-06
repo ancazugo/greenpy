@@ -16,8 +16,13 @@
 #   greenpy run -c examples/nairobi.yaml -p Tree_count --geo_level ADM2_code
 #   greenpy run -c examples/nairobi.yaml -p T30_buildings --geo_level ADM2_code --buffer 50 --gee_scale 10
 #   greenpy run -c examples/nairobi.yaml -p T30_buildings --geo_level ADM2_code --buffer 100 --gee_scale 10
+#   greenpy run -c examples/nairobi.yaml -p Trees --geo_code context   # trees in the 100 m ring around the county
+#   greenpy run -c examples/nairobi.yaml -p Heights   # GBA, UT-GLOBUS, Open Buildings 2.5D, GHS via GEE
+#   greenpy run -c examples/nairobi.yaml -p Visibility --geo_level ADM2_code --buffer 50
+#   greenpy run -c examples/nairobi.yaml -p Visibility --geo_level ADM2_code --buffer 100
 #   greenpy run -c examples/nairobi.yaml -p Merge --t3_buffers 50 --t3_buffers 100
-#     (the rule's "30" is the ward canopy; add --rule_t30_buffer 50 or 100 to use per-building canopy)
+#     (the rule's "30" is the ward canopy; add --rule_t30_buffer 50 or 100 to use per-building canopy;
+#     add --rule_t3_metric visibility for "3" = trees in view from some floor)
 # H3 aggregation beside the wards (repeat with --dggs_resolution 8 for ~0.7 km2 cells):
 #   greenpy run -c examples/nairobi.yaml -p T30 --geo_level ADM2_code --gee_scale 10 --dggs h3 --dggs_resolution 9
 #   greenpy run -c examples/nairobi.yaml -p Tree_count --geo_level ADM2_code --dggs h3 --dggs_resolution 9
@@ -72,3 +77,13 @@ output:
   base_dir: /scratch/acz25/greenpy_runs/nairobi/output
 
 gee_project: ee-phd-thesis
+
+# Building heights for Visibility: global datasets fill in where Overture has none
+# (first valid height wins). GBA is CC BY-NC 4.0 (non-commercial).
+heights:
+  sources:
+    - native
+    - gba
+    - {source: utglobus, city: nairobi}
+    - {source: open_buildings_temporal, year: 2023}
+    - ghs_built_h
